@@ -19,18 +19,95 @@ defmodule Registry do
   more scalable behaviour for running registries on highly concurrent
   environments with thousands or millions of entries.
 
+  ## Using in `:via`
+
+  Once the registry is started with a given name, it can be used to
+  register and access named processes using the `{:via, Registry, {name, key}}`
+  tuple:
+
+      iex> {:ok, _} = Registry.start_link(:unique, Registry.ViaTest)
+      iex> name = {:via, Registry, {Registry.ViaTest, "agent"}}
+      iex> {:ok, _} = Agent.start_link(fn -> 0 end, name: name)
+      iex> Agent.get(name, & &1)
+      0
+      iex> Agent.update(name, & &1 + 1)
+      iex> Agent.get(name, & &1)
+      1
+
+  Typically the registry is started as part of a supervision tree though:
+
+      supervisor(Registry, [:unique, Registry.ViaTest])
+
+  Only registry with unique keys can be used in `:via`. If the name is
+  already taken, the `start_link` function, such as `Agent.start_link/2`
+  above, will return `{:error, {:already_started, current_pid}}`.
+
+  ## Using as a dispatcher
+
+  `Registry` has a dispatch mechanism that allows developers to implement
+  custom dispatch logic triggered from the caller. For example:
+
+      iex> {:ok, _} = Registry.start_link(:duplicate, Registry.DispatcherTest)
+      iex> {:ok, _} = Registry.register(Registry.DispatcherTest, "hello", {IO, :inspect})
+      iex> Registry.dispatch(Registry.DispatcherTest, "hello", fn entries ->
+      ...>   for {pid, {module, function}} <- entries, do: apply(module, function, [pid])
+      ...> end)
+      # Prints #PID<...>
+      :ok
+
+  By calling `register/3` different processes can register under a given
+  key and associate a specific `{module, function}` tuple under that key.
+  Later on, an entity interested in dispatching events, may call `dispatch/3`,
+  which will receive all entries under a given key, allowing the each
+  `{module, function}` to be invoked.
+
+  Keep in mind dispatching happens in the process that calls `dispatch/3`,
+  registered processes are not involved in dispatching unless they are
+  explicitly sent messages to. That's the example we will see next.
+
+  ## Using as a PubSub
+
+  Registries can also be used to implement a local, non-distributed,
+  scalable PubSub by relying on the `dispatch/3` function, similar to
+  the previous section, except we will send messages to each associated
+  process, instead of invoking a given module-function.
+
+  In this example, we will also set the number of partitions to the
+  number of schedulers online, which will make the registry more performant
+  on highly concurrent environments and allowing dispatching to happen
+  in parellel:
+
+      iex> {:ok, _} = Registry.start_link(:duplicate, Registry.PubSubTest,
+      ...>                                partitions: System.schedulers_online)
+      iex> {:ok, _} = Registry.register(Registry.PubSubTest, "hello", [])
+      iex> Registry.dispatch(Registry.PubSubTest, "hello", fn entries ->
+      ...>   for {pid, _} <- entries, do: send(pid, {:broadcast, "world"})
+      ...> end)
+      :ok
+
+  The example above broadcasted the message `{:broadcast, "world"}` to all
+  processes registered under the topic "hello".
+
+  The third argument given to `register/3` is a value associated to the
+  current process. While in the previous section we used it when dispatching,
+  in this particular example we are not interested on it, so we have set it
+  to an empty list. You could store a more meaningful value if necessary.
+
+  ## Registrations
+
   Looking up, dispatching and registering are efficient and immediate at
   the cost of delayed unsubscription. For example, if a process crashes,
   its keys are automatically removed from the registry but the change may
   not propagate immediately. This means certain operations may return process
-  that are already dead. Those scenarios will be explicitly listed in the
-  documentation. However, keep in mind those cases are typically not an issue.
-  After all, a process referenced by a pid may crash at any time, including
-  between getting the value from the registry and sending it a message. Many
-  parts of the standard library are designed to cope with that, such as
-  `Process.monitor/1` which will deliver the DOWN message immediately if
-  the monitored process is already dead and `Kernel.send/2` which acts as a
-  no-op for dead processes.
+  that are already dead. When such may happen, it will be explicitly written
+  in the function documentation.
+
+  However, keep in mind those cases are typically not an issue. After all, a
+  process referenced by a pid may crash at any time, including between getting
+  the value from the registry and sending it a message. Many parts of the standard
+  library are designed to cope with that, such as `Process.monitor/1` which will
+  deliver the DOWN message immediately if the monitored process is already dead
+  and `Kernel.send/2` which acts as a no-op for dead processes.
   """
 
   @kind [:unique, :duplicate]
@@ -62,7 +139,7 @@ defmodule Registry do
   def send({name, key}, msg) do
     case whereis(name, key) do
       {pid, _} -> Kernel.send(pid, msg)
-      :error -> msg
+      :error -> :erlang.error(:badarg, [{name, key}, msg])
     end
   end
 
@@ -114,6 +191,85 @@ defmodule Registry do
     end
     options = Keyword.put_new(options, :partitions, 1)
     Registry.Supervisor.start_link(kind, name, options)
+  end
+
+  @doc """
+  Invokes the callback with all entries under `key` in each partition
+  for the `name` registry.
+
+  The list of `entries` is a non-empty list of two-element tuples where
+  the first element is the pid and the second element is the value
+  associated to the pid.
+
+  If the registry has unique keys, the callback function will be
+  invoked only if it has a matching entry for key. The entries list
+  will then contain a single element.
+
+  If the registry has duplicate keys, the callback will be invoked
+  per partition **concurrently**. The callback, however, won't be
+  invoked if there are no entries for that particular partition.
+
+  Keep in mind the `dispatch/3` function may return that have died
+  but not yet removed from the table. If this can be of an issue,
+  consider explicitly checking if the process is alive in the entries
+  table. Remember there are no guarantees though, after all, the
+  process may also crash right after the `Process.alive?/1` check.
+
+  See the module documentation for examples of using the `dispatch/3`
+  function for building custom dispatching or a pubsub system.
+  """
+  @spec dispatch(name, key, (entries :: [{pid, value}] -> term)) :: :ok
+  def dispatch(name, key, mfa_or_fun)
+      when is_atom(name) and is_function(mfa_or_fun, 1)
+      when is_atom(name) and tuple_size(mfa_or_fun) == 3 do
+    case info!(name) do
+      {:unique, partitions} ->
+        name
+        |> dispatch_lookup(:erlang.phash2(key, partitions), key)
+        |> List.wrap()
+        |> apply_non_empty_to_mfa_or_fun(mfa_or_fun)
+      {:duplicate, 1} ->
+        name
+        |> dispatch_lookup(0, key)
+        |> apply_non_empty_to_mfa_or_fun(mfa_or_fun)
+      {:duplicate, partitions} ->
+        name
+        |> dispatch_task(key, mfa_or_fun, partitions)
+        |> Enum.each(&Task.await(&1, :infinity))
+    end
+    :ok
+  end
+
+  defp dispatch_lookup(name, partition, key) do
+    try do
+      :ets.lookup_element(key_ets!(name, partition), key, 2)
+    catch
+      :error, :badarg -> []
+    end
+  end
+
+  defp dispatch_task(_name, _key, _mfa_or_fun, 0) do
+    []
+  end
+  defp dispatch_task(name, key, mfa_or_fun, partition) do
+    partition = partition - 1
+    task = Task.async(fn ->
+      name
+      |> dispatch_lookup(partition, key)
+      |> apply_non_empty_to_mfa_or_fun(mfa_or_fun)
+      :ok
+    end)
+    [task | dispatch_task(name, key, mfa_or_fun, partition)]
+  end
+
+  defp apply_non_empty_to_mfa_or_fun([], _mfa_or_fun) do
+    :ok
+  end
+  defp apply_non_empty_to_mfa_or_fun(entries, {module, function, args}) do
+    apply(module, function, [entries | args])
+  end
+  defp apply_non_empty_to_mfa_or_fun(entries, fun) do
+    fun.(entries)
   end
 
   @doc """

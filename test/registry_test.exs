@@ -1,6 +1,6 @@
 defmodule RegistryTest do
   use ExUnit.Case, asycn: true
-  doctest Registry
+  doctest Registry, except: [:moduledoc]
 
   setup config do
     kind = config[:kind] || :unique
@@ -57,6 +57,20 @@ defmodule RegistryTest do
         :sys.suspend(owner)
         kill_and_assert_down(task)
         assert Registry.keys(registry, task) == []
+      end
+
+      test "dispatches to a single key", %{registry: registry} do
+        assert Registry.dispatch(registry, "hello", fn _ ->
+          raise "will never be invoked"
+        end) == :ok
+
+        {:ok, _} = Registry.register(registry, "hello", :value)
+
+        assert Registry.dispatch(registry, "hello", fn [{pid, value}] ->
+          send(pid, {:dispatch, value})
+        end)
+
+        assert_received {:dispatch, :value}
       end
 
       test "allows process unregistering", %{registry: registry} do
@@ -165,6 +179,32 @@ defmodule RegistryTest do
         :sys.suspend(owner)
         kill_and_assert_down(task)
         assert Registry.keys(registry, task) == []
+      end
+
+      test "dispatches to multiple keys", %{registry: registry} do
+        assert Registry.dispatch(registry, "hello", fn _ ->
+          raise "will never be invoked"
+        end) == :ok
+
+        {:ok, _} = Registry.register(registry, "hello", :value1)
+        {:ok, _} = Registry.register(registry, "hello", :value2)
+        {:ok, _} = Registry.register(registry, "world", :value3)
+
+        assert Registry.dispatch(registry, "hello", fn entries ->
+          for {pid, value} <- entries, do: send(pid, {:dispatch, value})
+        end)
+
+        assert_received {:dispatch, :value1}
+        assert_received {:dispatch, :value2}
+        refute_received {:dispatch, :value3}
+
+        assert Registry.dispatch(registry, "world", fn entries ->
+          for {pid, value} <- entries, do: send(pid, {:dispatch, value})
+        end)
+
+        refute_received {:dispatch, :value1}
+        refute_received {:dispatch, :value2}
+        assert_received {:dispatch, :value3}
       end
 
       test "allows process unregistering", %{registry: registry} do
