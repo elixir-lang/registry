@@ -40,6 +40,39 @@ defmodule Registry do
   @type key :: term
   @type value :: term
 
+  ## Via callbacks
+
+  @doc false
+  def whereis_name({name, key}) do
+    case whereis(name, key) do
+      {pid, _} -> pid
+      :error -> :undefined
+    end
+  end
+
+  @doc false
+  def register_name({name, key}, pid) when pid == self() do
+    case register(name, key, 0) do
+      {:ok, _} -> :yes
+      {:error, _} -> :no
+    end
+  end
+
+  @doc false
+  def send({name, key}, msg) do
+    case whereis(name, key) do
+      {pid, _} -> Kernel.send(pid, msg)
+      :error -> msg
+    end
+  end
+
+  @doc false
+  def unregister_name({name, key}) do
+    unregister(name, key)
+  end
+
+  ## Registry API
+
   @doc """
   Starts the registry as a supervisor process.
 

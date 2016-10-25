@@ -115,6 +115,27 @@ defmodule RegistryTest do
           Registry.register(:unknown, "hello", :value)
         end
       end
+
+      test "via callbacks", %{registry: registry} do
+        name = {:via, Registry, {registry, "hello"}}
+
+        # register_name
+        {:ok, pid} = Agent.start_link(fn -> 0 end, name: name)
+
+        # send
+        assert Agent.update(name, & &1 + 1) == :ok
+
+        # whereis_name
+        assert Agent.get(name, & &1) == 1
+
+        # unregister_name
+        assert {:error, _} =
+               Agent.start(fn -> raise "oops" end)
+
+        # errors
+        assert {:error, {:already_started, ^pid}} =
+               Agent.start(fn -> 0 end, name: name)
+      end
     end
   end
 
@@ -199,6 +220,13 @@ defmodule RegistryTest do
       test "raises on unknown registry name" do
         assert_raise ArgumentError, ~r/unknown registry/, fn ->
           Registry.register(:unknown, "hello", :value)
+        end
+      end
+
+      test "raises if attempt to be used on via", %{registry: registry} do
+        assert_raise ArgumentError, "Registry.whereis/2 not supported for duplicate registries", fn ->
+          name = {:via, Registry, {registry, "hello"}}
+          Agent.start_link(fn -> 0 end, name: name)
         end
       end
     end
