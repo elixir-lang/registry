@@ -13,6 +13,10 @@ defmodule RegistryTest do
     describe "unique #{describe}" do
       @describetag kind: :unique, partitions: partitions
 
+      test "starts configured amount of partitions", %{registry: registry, partitions: partitions} do
+        assert length(Supervisor.which_children(registry)) == partitions
+      end
+
       test "has unique registrations", %{registry: registry} do
         {:ok, pid} = Registry.register(registry, "hello", :value)
         assert is_pid(pid)
@@ -156,6 +160,10 @@ defmodule RegistryTest do
   for {describe, partitions} <- ["with 1 partition": 1, "with 8 partitions": 8] do
     describe "duplicate #{describe}" do
       @describetag kind: :duplicate, partitions: partitions
+
+      test "starts configured amount of partitions", %{registry: registry, partitions: partitions} do
+        assert length(Supervisor.which_children(registry)) == partitions
+      end
 
       test "has duplicate registrations", %{registry: registry} do
         {:ok, pid} = Registry.register(registry, "hello", :value)
