@@ -110,6 +110,8 @@ defmodule Registry do
   and `Kernel.send/2` which acts as a no-op for dead processes.
   """
 
+  # TODO: Decide if it should be started as part of Elixir's supervision tree.
+
   @kind [:unique, :duplicate]
 
   @type name :: atom

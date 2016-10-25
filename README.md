@@ -1,7 +1,9 @@
 # Registry
 
+A local and scalable key-value process storage. [See the documentation](http://elixir-lang.org/docs/registry).
 
+This is a proposal implementation to be included as part of Elixir v1.4.
 
-## TODO
+## License
 
-* Consider starting up a registry as part of Elixir's supervision tree
+Same as Elixir.
