@@ -11,8 +11,12 @@ defmodule Registry do
   registered the key. If the process crashes, the keys associated to that
   process are automatically removed, albeit with a possible delay.
 
-  The registry may be transparently partitioned, which provides more
-  scalable behaviour for running registries on highly concurrent
+  The registry can be used for name lookups, using the `:via` option,
+  for storing properties,  for custom dispatching rules as well as a
+  pubsub implementation. We explore those scenarios below.
+
+  The registry may also be transparently partitioned, which provides
+  more scalable behaviour for running registries on highly concurrent
   environments with thousands or millions of entries.
 
   Looking up, dispatching and registering is efficient at the cost of
@@ -53,13 +57,97 @@ defmodule Registry do
   end
 
   @doc """
+  Finds the process for the given `key` in the unique `name` registry.
+
+  Returns `{pid, value}` if the registered `pid` is alive where
+  `value` is the term associated to the pid on registration. Otherwise
+  it returns `nil`.
+
+  `ArgumentError` will be raised if a non-unique registry name is given.
+
+  ## Examples
+
+  In the example below we register the current process and look it up
+  both from itself and other processes.
+
+      iex> Registry.start_link(:unique, Registry.WhereIsTest)
+      iex> {:ok, _} = Registry.register(Registry.WhereIsTest, "hello", :world)
+      iex> Registry.whereis(Registry.WhereIsTest, "hello")
+      {self(), :world}
+      iex> Task.async(fn -> Registry.whereis(Registry.WhereIsTest, "hello") end) |> Task.await
+      {self(), :world}
+      iex> Registry.whereis(Registry.WhereIsTest, "unknown")
+      nil
+
+  """
+  @spec whereis(name, key) :: {pid, value} | :error
+  def whereis(name, key) when is_atom(name) do
+    case info!(name) do
+      {:unique, partitions} ->
+        key_partition = :erlang.phash2(key, partitions)
+        key_ets = key_ets!(name, key_partition)
+        case :ets.lookup(key_ets, key) do
+          [{^key, {pid, _} = pair}] ->
+            if Process.alive?(pid), do: pair, else: nil
+          [] ->
+            nil
+        end
+      {kind, _} ->
+        raise ArgumentError, "Registry.whereis/2 not supported for #{kind} registries"
+    end
+  end
+
+  @doc """
+  Returns the known keys for the given `pid` in `name`.
+
+  If the registry is unique, the keys are unique. Otherwise
+  they may contain duplicates if the process was registered
+  under the same key multiple times. The list will be empty
+  if the process is dead or it has no keys in this registry.
+
+  ## Examples
+
+  Registering under a unique registry does not allow multiple entries:
+
+      iex> Registry.start_link(:unique, Registry.UniqueKeysTest)
+      iex> {:ok, _} = Registry.register(Registry.UniqueKeysTest, "hello", :world)
+      iex> Registry.register(Registry.UniqueKeysTest, "hello", :later)
+      {:error, {:already_registered, self()}}
+      iex> Registry.keys(Registry.UniqueKeysTest, self())
+      ["hello"]
+
+  Such is possible for duplicate registries though:
+
+      iex> Registry.start_link(:duplicate, Registry.DuplicateKeysTest)
+      iex> {:ok, _} = Registry.register(Registry.DuplicateKeysTest, "hello", :world)
+      iex> {:ok, _} = Registry.register(Registry.DuplicateKeysTest, "hello", :world)
+      iex> Registry.keys(Registry.DuplicateKeysTest, self())
+      ["hello", "hello"]
+  """
+  @spec keys(name, pid) :: [key]
+  def keys(name, pid) when is_atom(name) and is_pid(pid) do
+    {kind, partitions} = info!(name)
+    pid_partition = :erlang.phash2(pid, partitions)
+    {_, pid_ets} = pid_ets!(name, pid_partition)
+    keys = :ets.lookup_element(pid_ets, pid, 2)
+    cond do
+      not Process.alive?(pid) -> []
+      kind == :unique -> Enum.uniq(keys)
+      true -> keys
+    end
+  end
+
+  @doc """
   Registers the current process under the given `key` in registry.
 
   A value to be associated with this registration must also be given.
   This value will be retrieved whenever dispatching or doing a key
   lookup.
 
-  This function returns `:ok` or `{:error, reason}`.
+  This function returns `{:ok, owner}` or `{:error, reason}`.
+  The `owner` is the pid of the registry partition responsible for
+  the pid and may be linked or monitored by the caller to react to
+  failures.
 
   If the registry has unique keys, it will return `:ok` unless the
   key is already associated to a pid, in which case it returns
@@ -68,53 +156,63 @@ defmodule Registry do
   If the registry has duplicate keys, multiple registrations from the
   current process under the same key are allowed.
 
-  ## Options
+  ## Examples
 
-  The following options are supported:
+  Registering under a unique registry does not allow multiple entries:
 
-    * `:link` - when true, links the current process to its relevant partition
+      iex> Registry.start_link(:unique, Registry.UniqueRegisterTest)
+      iex> {:ok, _} = Registry.register(Registry.UniqueRegisterTest, "hello", :world)
+      iex> Registry.register(Registry.UniqueRegisterTest, "hello", :later)
+      {:error, {:already_registered, self()}}
+      iex> Registry.keys(Registry.UniqueRegisterTest, self())
+      ["hello"]
+
+  Such is possible for duplicate registries though:
+
+      iex> Registry.start_link(:duplicate, Registry.DuplicateRegisterTest)
+      iex> {:ok, _} = Registry.register(Registry.DuplicateRegisterTest, "hello", :world)
+      iex> {:ok, _} = Registry.register(Registry.DuplicateRegisterTest, "hello", :world)
+      iex> Registry.keys(Registry.DuplicateRegisterTest, self())
+      ["hello", "hello"]
 
   """
-  @spec register(name, key, value, opts :: Keyword.t) :: :ok | {:error, {:already_registered, pid}}
-  def register(name, key, value, opts \\ []) do
+  @spec register(name, key, value) :: {:ok, pid} | {:error, {:already_registered, pid}}
+  def register(name, key, value) when is_atom(name) do
     self = self()
     {kind, partitions} = info!(name)
     {key_partition, pid_partition} =
       Registry.Partition.partitions(kind, key, self, partitions)
     key_ets = key_ets!(name, key_partition)
-    pid_ets = pid_ets!(name, pid_partition)
-
-    pid_server = Process.whereis(pid_ets)
-    opts[:link] && Process.link(pid_server)
+    {pid_server, pid_ets} = pid_ets!(name, pid_partition)
 
     :ok = GenServer.cast(pid_server, {:monitor, self})
-
     # Register first in the pid ets table because it will always
     # be able to do the clean up. If we register first to the key
     # one and the process crashes, the key will stay there forever.
     true = :ets.insert(pid_ets, {self, key, key_partition})
-    register_key(kind, key_ets, key, {key, {self, value}})
+    register_key(kind, pid_server, key_ets, key, {key, {self, value}})
   end
 
-  defp register_key(:duplicate, key_ets, _key, entry) do
+  defp register_key(:duplicate, pid_server, key_ets, _key, entry) do
     true = :ets.insert(key_ets, entry)
-    :ok
+    {:ok, pid_server}
   end
-  defp register_key(:unique, key_ets, key, entry) do
+  defp register_key(:unique, pid_server, key_ets, key, entry) do
     if :ets.insert_new(key_ets, entry) do
-      :ok
+      {:ok, pid_server}
     else
       # Notice we have to call register_key recursively
       # because we are always at odds of a race condition.
       case :ets.lookup(key_ets, key) do
-        [{^key, {pid, _}}] ->
+        [{^key, {pid, _}} = current] ->
           if Process.alive?(pid) do
             {:error, {:already_registered, pid}}
           else
-            register_key(:unique, key_ets, key, entry)
+            :ets.delete_object(key_ets, current)
+            register_key(:unique, pid_server, key_ets, key, entry)
           end
         [] ->
-          register_key(:unique, key_ets, key, entry)
+          register_key(:unique, pid_server, key_ets, key, entry)
       end
     end
   end
@@ -176,7 +274,7 @@ defmodule Registry.Supervisor do
 
   def init({kind, name, options}) do
     partitions = Keyword.get(options, :partitions, 1)
-    ^name = :ets.new(name, [:set, :named_table, read_concurrency: true])
+    ^name = :ets.new(name, [:set, :public, :named_table, read_concurrency: true])
     true = :ets.insert(name, options)
     true = :ets.insert(name, {:__info__, kind, partitions})
 
@@ -185,13 +283,12 @@ defmodule Registry.Supervisor do
         {i, Registry.Partition.key_name(name, i), Registry.Partition.pid_name(name, i)}
       end
 
-    true = :ets.insert(name, names)
     keys = for {i, key_partition, _} <- names, do: {i, key_partition}, into: %{}
 
     children =
-      for {_, {key_partition, pid_partition}} <- names do
-        arg = {kind, key_partition, pid_partition, keys}
-        worker(Partition, [pid_partition, arg], id: pid_partition)
+      for {i, key_partition, pid_partition} <- names do
+        arg = {kind, name, i, key_partition, pid_partition, keys}
+        worker(Registry.Partition, [pid_partition, arg], id: pid_partition)
       end
 
     supervise(children, strategy: strategy_for_kind(kind))
@@ -267,7 +364,10 @@ defmodule Registry.Partition do
   end
 
   @doc """
-  Starts the registry.
+  Starts the registry partition.
+
+  The process is only responsible for monitoring, demonitoring
+  and cleaning up when monitored processes crash.
   """
   def start_link(name, arg) do
     GenServer.start_link(__MODULE__, arg, name: name)
@@ -275,29 +375,27 @@ defmodule Registry.Partition do
 
   ## Callbacks
 
-  def init({kind, key_partition, pid_partition, keys}) do
+  def init({kind, name, i, key_partition, pid_partition, keys}) do
     Process.flag(:trap_exit, true)
-    init_key_partition(kind, key_partition)
-    init_pid_partition(kind, pid_partition)
+    key_ets = init_key_ets(kind, key_partition)
+    pid_ets = init_pid_ets(kind, pid_partition)
+    true = :ets.insert(name, {i, key_ets, {self(), pid_ets}})
     {:ok, %{pid_partition: pid_partition, keys: keys, monitors: %{}}}
   end
 
   # The key partition is a set for unique keys,
   # duplicate bag for duplicate ones.
-  defp init_key_partition(:unique, key_partition) do
-    :ets.new(key_partition, [:set, :named_table, :public,
-                             read_concurrency: true, write_concurrency: true])
+  defp init_key_ets(:unique, key_partition) do
+    :ets.new(key_partition, [:set, :public, read_concurrency: true, write_concurrency: true])
   end
-  defp init_key_partition(:duplicate, key_partition) do
-    :ets.new(key_partition, [:duplicate_bag, :named_table, :public,
-                             read_concurrency: true, write_concurrency: true])
+  defp init_key_ets(:duplicate, key_partition) do
+    :ets.new(key_partition, [:duplicate_bag, :public, read_concurrency: true, write_concurrency: true])
   end
 
   # A process can always have multiple keys, so the
   # pid partition is always a duplicate bag.
-  defp init_pid_partition(_, pid_partition) do
-    :ets.new(pid_partition, [:duplicate_bag, :named_table, :public,
-                             read_concurrency: true, write_concurrency: true])
+  defp init_pid_ets(_, pid_partition) do
+    :ets.new(pid_partition, [:duplicate_bag, :public, read_concurrency: true, write_concurrency: true])
   end
 
   def handle_cast({:monitor, pid}, state) do
@@ -310,14 +408,18 @@ defmodule Registry.Partition do
   def handle_info({:DOWN, _ref, _type, pid, _info}, state) do
     %{pid_partition: pid_partition, keys: keys} = state
 
-    entries = :ets.take(pid_partition, pid)
-    for {_pid, key, key_partition} <- entries do
-      try do
-        key_ets = Map.fetch!(keys, key_partition)
-        true = :ets.match_delete(key_ets, {key, {pid, :_}})
-      catch
-        :error, :badarg -> :badarg
+    try do
+      entries = :ets.take(pid_partition, pid)
+      for {_pid, key, key_partition} <- entries do
+        try do
+          key_ets = Map.fetch!(keys, key_partition)
+          true = :ets.match_delete(key_ets, {key, {pid, :_}})
+        catch
+          :error, :badarg -> :badarg
+        end
       end
+    catch
+      :error, :badarg -> :badarg
     end
 
     {:noreply, delete_monitor(state, pid)}
