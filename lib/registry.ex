@@ -9,27 +9,28 @@ defmodule Registry do
 
   Each entry in the registry is associated to the process that has
   registered the key. If the process crashes, the keys associated to that
-  process are automatically removed, albeit with a possible delay.
+  process are automatically removed.
 
   The registry can be used for name lookups, using the `:via` option,
-  for storing properties,  for custom dispatching rules as well as a
+  for storing properties, for custom dispatching rules as well as a
   pubsub implementation. We explore those scenarios below.
 
   The registry may also be transparently partitioned, which provides
   more scalable behaviour for running registries on highly concurrent
   environments with thousands or millions of entries.
 
-  Looking up, dispatching and registering is efficient at the cost of
-  delayed unsubscription. For example, if a process crashes, its keys
-  are automatically removed from the registry but the change may not
-  propagate immediately. This means that, if you are looking up by key,
-  the key may point to a process that is already dead. However, this is
-  typically not an issue. After all, a process referenced by a pid may
-  crash at any time, including between getting the value from the registry
-  and sending it a message. Many parts of the standard library are designed
-  to cope with that, such as `Process.monitor/1` which will deliver the
-  DOWN message immediately if the monitored process is already dead and
-  `Kernel.send/2` which acts as a no-op for dead processes.
+  Looking up, dispatching and registering are efficient and immediate at
+  the cost of delayed unsubscription. For example, if a process crashes,
+  its keys are automatically removed from the registry but the change may
+  not propagate immediately. This means certain operations may return process
+  that are already dead. Those scenarios will be explicitly listed in the
+  documentation. However, keep in mind those cases are typically not an issue.
+  After all, a process referenced by a pid may crash at any time, including
+  between getting the value from the registry and sending it a message. Many
+  parts of the standard library are designed to cope with that, such as
+  `Process.monitor/1` which will deliver the DOWN message immediately if
+  the monitored process is already dead and `Kernel.send/2` which acts as a
+  no-op for dead processes.
   """
 
   @kind [:unique, :duplicate]
@@ -39,14 +40,40 @@ defmodule Registry do
   @type key :: term
   @type value :: term
 
-  # TODO: Getting a list of all keys for a given process needs
-  # to consider :unique or :duplicate and call Enum.uniq accordingly.
+  @doc """
+  Starts the registry as a supervisor process.
 
-  # The registry is a supervised process.
-  # The registry uses one ets plus one ets table per partition.
-  # Options can be any keyword list which are stored in the registry.
-  # The only key with meaning specific to the Registry is :partitions.
+  Manually it can be started as:
 
+      Registry.start_link(:unique, MyApp.Registry)
+
+  In your supervisor tree, you would write:
+
+      supervisor(Registry, [:unique, MyApp.Registry])
+
+  For intensive workloads, the registry may also be partitioned. If
+  partioning is required a good default is to set the number of
+  partitions to the number of schedulers available:
+
+      Registry.start_link(:unique, MyApp.Registry, partitions: System.schedulers_online())
+
+  or:
+
+      supervisor(Registry, [:unique, MyApp.Registry, [partitions: System.schedulers_online()]])
+
+  The registry uses one ETS table for metadata plus 2 ETS tables
+  per partition.
+
+  ## Options
+
+  `options` is a keyword list with metadata that is stored in the
+  registry and may be looked up using the `info/2` function. Only
+  the following keys have meaning for the registry:
+
+    * `:partitions` - the number of partitions in the registry. Defaults to 1.
+
+  All other keys are stored as is.
+  """
   @spec start_link(kind, name, Keyword.t) :: {:ok, pid} | {:error, term}
   def start_link(kind, name, options \\ []) when kind in @kind and is_atom(name) do
     unless Keyword.keyword?(options) do
@@ -71,13 +98,13 @@ defmodule Registry do
   both from itself and other processes.
 
       iex> Registry.start_link(:unique, Registry.WhereIsTest)
+      iex> Registry.whereis(Registry.WhereIsTest, "hello")
+      :error
       iex> {:ok, _} = Registry.register(Registry.WhereIsTest, "hello", :world)
       iex> Registry.whereis(Registry.WhereIsTest, "hello")
       {self(), :world}
       iex> Task.async(fn -> Registry.whereis(Registry.WhereIsTest, "hello") end) |> Task.await
       {self(), :world}
-      iex> Registry.whereis(Registry.WhereIsTest, "unknown")
-      nil
 
   """
   @spec whereis(name, key) :: {pid, value} | :error
@@ -88,9 +115,9 @@ defmodule Registry do
         key_ets = key_ets!(name, key_partition)
         case :ets.lookup(key_ets, key) do
           [{^key, {pid, _} = pair}] ->
-            if Process.alive?(pid), do: pair, else: nil
+            if Process.alive?(pid), do: pair, else: :error
           [] ->
-            nil
+            :error
         end
       {kind, _} ->
         raise ArgumentError, "Registry.whereis/2 not supported for #{kind} registries"
@@ -98,7 +125,7 @@ defmodule Registry do
   end
 
   @doc """
-  Returns the known keys for the given `pid` in `name`.
+  Returns the known keys for the given `pid` in `name` in no particular order.
 
   If the registry is unique, the keys are unique. Otherwise
   they may contain duplicates if the process was registered
@@ -110,6 +137,8 @@ defmodule Registry do
   Registering under a unique registry does not allow multiple entries:
 
       iex> Registry.start_link(:unique, Registry.UniqueKeysTest)
+      iex> Registry.keys(Registry.UniqueKeysTest, self())
+      []
       iex> {:ok, _} = Registry.register(Registry.UniqueKeysTest, "hello", :world)
       iex> Registry.register(Registry.UniqueKeysTest, "hello", :later)
       {:error, {:already_registered, self()}}
@@ -119,21 +148,31 @@ defmodule Registry do
   Such is possible for duplicate registries though:
 
       iex> Registry.start_link(:duplicate, Registry.DuplicateKeysTest)
+      iex> Registry.keys(Registry.DuplicateKeysTest, self())
+      []
       iex> {:ok, _} = Registry.register(Registry.DuplicateKeysTest, "hello", :world)
       iex> {:ok, _} = Registry.register(Registry.DuplicateKeysTest, "hello", :world)
       iex> Registry.keys(Registry.DuplicateKeysTest, self())
       ["hello", "hello"]
+
   """
   @spec keys(name, pid) :: [key]
   def keys(name, pid) when is_atom(name) and is_pid(pid) do
     {kind, partitions} = info!(name)
     pid_partition = :erlang.phash2(pid, partitions)
     {_, pid_ets} = pid_ets!(name, pid_partition)
-    keys = :ets.lookup_element(pid_ets, pid, 2)
-    cond do
-      not Process.alive?(pid) -> []
-      kind == :unique -> Enum.uniq(keys)
-      true -> keys
+
+    try do
+      :ets.lookup_element(pid_ets, pid, 2)
+    catch
+      :error, :badarg -> []
+    else
+      keys ->
+        cond do
+          not Process.alive?(pid) -> []
+          kind == :unique -> Enum.uniq(keys)
+          true -> keys
+        end
     end
   end
 
@@ -189,7 +228,7 @@ defmodule Registry do
     # Register first in the pid ets table because it will always
     # be able to do the clean up. If we register first to the key
     # one and the process crashes, the key will stay there forever.
-    true = :ets.insert(pid_ets, {self, key, key_partition})
+    true = :ets.insert(pid_ets, {self, key, key_ets})
     register_key(kind, pid_server, key_ets, key, {key, {self, value}})
   end
 
@@ -224,12 +263,12 @@ defmodule Registry do
 
       iex> Registry.start_link(:unique, Registry.InfoDocTest, custom_key: "custom_value")
       iex> Registry.info(Registry.InfoDocTest, :custom_key)
-      {:ok, "custom_value"}
+      {:custom_key, "custom_value"}
       iex> Registry.info(Registry.InfoDocTest, :unknown_key)
       :error
 
   """
-  @spec info(name, info_key :: atom) :: {:ok, info_value :: term} | :error
+  @spec info(name, info_key :: atom) :: {info_key :: atom, info_value :: term} | :error
   def info(name, key) when is_atom(name) and is_atom(key) do
     try do
       :ets.lookup(name, key)
@@ -237,7 +276,7 @@ defmodule Registry do
       :error, :badarg ->
         raise ArgumentError, "unknown registry: #{inspect name}"
     else
-      [{^key, value}] -> {:ok, value}
+      [{^key, _} = pair] -> pair
       _ -> :error
     end
   end
@@ -278,16 +317,11 @@ defmodule Registry.Supervisor do
     true = :ets.insert(name, options)
     true = :ets.insert(name, {:__info__, kind, partitions})
 
-    names =
-      for i <- 0..partitions-1 do
-        {i, Registry.Partition.key_name(name, i), Registry.Partition.pid_name(name, i)}
-      end
-
-    keys = for {i, key_partition, _} <- names, do: {i, key_partition}, into: %{}
-
     children =
-      for {i, key_partition, pid_partition} <- names do
-        arg = {kind, name, i, key_partition, pid_partition, keys}
+      for i <- 0..partitions-1 do
+        key_partition = Registry.Partition.key_name(name, i)
+        pid_partition = Registry.Partition.pid_name(name, i)
+        arg = {kind, name, i, key_partition, pid_partition}
         worker(Registry.Partition, [pid_partition, arg], id: pid_partition)
       end
 
@@ -375,12 +409,12 @@ defmodule Registry.Partition do
 
   ## Callbacks
 
-  def init({kind, name, i, key_partition, pid_partition, keys}) do
+  def init({kind, name, i, key_partition, pid_partition}) do
     Process.flag(:trap_exit, true)
     key_ets = init_key_ets(kind, key_partition)
     pid_ets = init_pid_ets(kind, pid_partition)
     true = :ets.insert(name, {i, key_ets, {self(), pid_ets}})
-    {:ok, %{pid_partition: pid_partition, keys: keys, monitors: %{}}}
+    {:ok, {pid_ets, %{}}}
   end
 
   # The key partition is a set for unique keys,
@@ -398,50 +432,51 @@ defmodule Registry.Partition do
     :ets.new(pid_partition, [:duplicate_bag, :public, read_concurrency: true, write_concurrency: true])
   end
 
-  def handle_cast({:monitor, pid}, state) do
-    {:noreply, put_new_monitor(state, pid)}
-  end
-  def handle_cast({:demonitor, pid}, state) do
-    {:noreply, delete_monitor(state, pid)}
+  def handle_call(:sync, _, state) do
+    {:reply, :ok, state}
   end
 
-  def handle_info({:DOWN, _ref, _type, pid, _info}, state) do
-    %{pid_partition: pid_partition, keys: keys} = state
+  def handle_cast({:monitor, pid}, {ets, monitors}) do
+    {:noreply, {ets, put_new_monitor(monitors, pid)}}
+  end
+  def handle_cast({:demonitor, pid}, {ets, monitors}) do
+    {:noreply, {ets, delete_monitor(monitors, pid)}}
+  end
 
-    try do
-      entries = :ets.take(pid_partition, pid)
-      for {_pid, key, key_partition} <- entries do
-        try do
-          key_ets = Map.fetch!(keys, key_partition)
-          true = :ets.match_delete(key_ets, {key, {pid, :_}})
-        catch
-          :error, :badarg -> :badarg
-        end
+  def handle_info({:DOWN, _ref, _type, pid, _info}, {ets, monitors}) do
+    entries = :ets.take(ets, pid)
+
+    for {_pid, key, key_ets} <- entries do
+      try do
+        :ets.match_delete(key_ets, {key, {pid, :_}})
+      catch
+        :error, :badarg -> :badarg
       end
-    catch
-      :error, :badarg -> :badarg
     end
 
-    {:noreply, delete_monitor(state, pid)}
+    {:noreply, {ets, delete_monitor(monitors, pid)}}
+  end
+  def handle_info({:EXIT, _, _}, state) do
+    {:noreply, state}
   end
   def handle_info(msg, state) do
     super(msg, state)
   end
 
-  defp put_new_monitor(%{monitors: monitors} = state, pid) do
+  defp put_new_monitor(monitors, pid) do
     case monitors do
-      %{^pid => _} -> state
-      %{} -> %{state | monitors: Map.put(monitors, pid, Process.monitor(pid))}
+      %{^pid => _} -> monitors
+      %{} -> Map.put(monitors, pid, Process.monitor(pid))
     end
   end
 
-  defp delete_monitor(%{monitors: monitors} = state, pid) do
+  defp delete_monitor(monitors, pid) do
     case monitors do
       %{^pid => ref} ->
         Process.demonitor(ref)
-        %{state | monitors: Map.delete(monitors, pid)}
+        Map.delete(monitors, pid)
       %{} ->
-        state
+        monitors
     end
   end
 end
