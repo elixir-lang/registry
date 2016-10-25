@@ -177,7 +177,64 @@ defmodule Registry do
   end
 
   @doc """
-  Registers the current process under the given `key` in registry.
+  Unregisters the current process from the given `key` in `name` registry.
+
+  Always returns `:ok` and automatically unlinks the current process from
+  the owner if there are no more keys associated to the current process.
+
+  If the registry allows duplicated keys, all `key` entries will be removed
+  on unregister.
+
+  ## Examples
+
+  For unique registries:
+
+      iex> Registry.start_link(:unique, Registry.UniqueUnregisterTest)
+      iex> Registry.register(Registry.UniqueUnregisterTest, "hello", :world)
+      iex> Registry.keys(Registry.UniqueUnregisterTest, self())
+      ["hello"]
+      iex> Registry.unregister(Registry.UniqueUnregisterTest, "hello")
+      :ok
+      iex> Registry.keys(Registry.UniqueUnregisterTest, self())
+      []
+
+  For duplicate registries:
+
+      iex> Registry.start_link(:duplicate, Registry.DuplicateUnregisterTest)
+      iex> Registry.register(Registry.DuplicateUnregisterTest, "hello", :world)
+      iex> Registry.register(Registry.DuplicateUnregisterTest, "hello", :world)
+      iex> Registry.keys(Registry.DuplicateUnregisterTest, self())
+      ["hello", "hello"]
+      iex> Registry.unregister(Registry.DuplicateUnregisterTest, "hello")
+      :ok
+      iex> Registry.keys(Registry.DuplicateUnregisterTest, self())
+      []
+
+  """
+  @spec unregister(name, key) :: :ok
+  def unregister(name, key) when is_atom(name) do
+    self = self()
+    {kind, partitions} = info!(name)
+    {key_partition, pid_partition} =
+      Registry.Partition.partitions(kind, key, self, partitions)
+    key_ets = key_ets!(name, key_partition)
+    {pid_server, pid_ets} = pid_ets!(name, pid_partition)
+
+    # Remove first from the key_ets because in case of crashes
+    # the pid_ets will still be able to clean up. The last step is
+    # to clean if we have no more entries.
+    true = :ets.match_delete(key_ets, {key, {self, :_}})
+    true = :ets.delete_object(pid_ets, {self, key, key_ets})
+
+    case :ets.select_count(pid_ets, [{{self, :_, :_}, [], [true]}]) do
+      0 -> Process.unlink(pid_server)
+      _ -> :ok
+    end
+    :ok
+  end
+
+  @doc """
+  Registers the current process under the given `key` in `name` registry.
 
   A value to be associated with this registration must also be given.
   This value will be retrieved whenever dispatching or doing a key
@@ -185,11 +242,10 @@ defmodule Registry do
 
   This function returns `{:ok, owner}` or `{:error, reason}`.
   The `owner` is the pid of the registry partition responsible for
-  the pid and may be linked or monitored by the caller to react to
-  failures.
+  the pid. The owner is automatically linked to the caller.
 
-  If the registry has unique keys, it will return `:ok` unless the
-  key is already associated to a pid, in which case it returns
+  If the registry has unique keys, it will return `{:ok, owner}` unless
+  the key is already associated to a pid, in which case it returns
   `{:error, {:already_registered, pid}}`.
 
   If the registry has duplicate keys, multiple registrations from the
@@ -224,10 +280,10 @@ defmodule Registry do
     key_ets = key_ets!(name, key_partition)
     {pid_server, pid_ets} = pid_ets!(name, pid_partition)
 
-    :ok = GenServer.cast(pid_server, {:monitor, self})
-    # Register first in the pid ets table because it will always
-    # be able to do the clean up. If we register first to the key
-    # one and the process crashes, the key will stay there forever.
+    # Notice we write first to the pid ets table because it will
+    # always be able to do the clean up. If we register first to the
+    # key one and the process crashes, the key will stay there forever.
+    Process.link(pid_server)
     true = :ets.insert(pid_ets, {self, key, key_ets})
     register_key(kind, pid_server, key_ets, key, {key, {self, value}})
   end
@@ -414,7 +470,7 @@ defmodule Registry.Partition do
     key_ets = init_key_ets(kind, key_partition)
     pid_ets = init_pid_ets(kind, pid_partition)
     true = :ets.insert(name, {i, key_ets, {self(), pid_ets}})
-    {:ok, {pid_ets, %{}}}
+    {:ok, pid_ets}
   end
 
   # The key partition is a set for unique keys,
@@ -436,16 +492,8 @@ defmodule Registry.Partition do
     {:reply, :ok, state}
   end
 
-  def handle_cast({:monitor, pid}, {ets, monitors}) do
-    {:noreply, {ets, put_new_monitor(monitors, pid)}}
-  end
-  def handle_cast({:demonitor, pid}, {ets, monitors}) do
-    {:noreply, {ets, delete_monitor(monitors, pid)}}
-  end
-
-  def handle_info({:DOWN, _ref, _type, pid, _info}, {ets, monitors}) do
+  def handle_info({:EXIT, pid, _reason}, ets) do
     entries = :ets.take(ets, pid)
-
     for {_pid, key, key_ets} <- entries do
       try do
         :ets.match_delete(key_ets, {key, {pid, :_}})
@@ -453,30 +501,9 @@ defmodule Registry.Partition do
         :error, :badarg -> :badarg
       end
     end
-
-    {:noreply, {ets, delete_monitor(monitors, pid)}}
-  end
-  def handle_info({:EXIT, _, _}, state) do
-    {:noreply, state}
+    {:noreply, ets}
   end
   def handle_info(msg, state) do
     super(msg, state)
-  end
-
-  defp put_new_monitor(monitors, pid) do
-    case monitors do
-      %{^pid => _} -> monitors
-      %{} -> Map.put(monitors, pid, Process.monitor(pid))
-    end
-  end
-
-  defp delete_monitor(monitors, pid) do
-    case monitors do
-      %{^pid => ref} ->
-        Process.demonitor(ref)
-        Map.delete(monitors, pid)
-      %{} ->
-        monitors
-    end
   end
 end

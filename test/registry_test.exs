@@ -49,14 +49,6 @@ defmodule RegistryTest do
         assert Registry.whereis(registry, "hello") == :error
       end
 
-      test "finds whereis linked process considering liveness", %{registry: registry} do
-        assert Registry.whereis(registry, "hello") == :error
-        {_, task} = register_task(registry, "hello", :value, link: true)
-        assert Registry.whereis(registry, "hello") == {task, :value}
-        kill_and_assert_down(task)
-        assert Registry.whereis(registry, "hello") == :error
-      end
-
       test "returns process keys considering liveness", %{registry: registry} do
         assert Registry.keys(registry, self()) == []
         {owner, task} = register_task(registry, "hello", :value)
@@ -65,6 +57,42 @@ defmodule RegistryTest do
         :sys.suspend(owner)
         kill_and_assert_down(task)
         assert Registry.keys(registry, task) == []
+      end
+
+      test "allows process unregistering", %{registry: registry} do
+        :ok = Registry.unregister(registry, "hello")
+
+        {:ok, _} = Registry.register(registry, "hello", :value)
+        {:ok, _} = Registry.register(registry, "world", :value)
+        assert Registry.keys(registry, self()) |> Enum.sort() == ["hello", "world"]
+
+        :ok = Registry.unregister(registry, "hello")
+        assert Registry.keys(registry, self()) == ["world"]
+
+        :ok = Registry.unregister(registry, "world")
+        assert Registry.keys(registry, self()) == []
+      end
+
+      test "allows unregistering with no entries", %{registry: registry} do
+        assert Registry.unregister(registry, "hello") == :ok
+      end
+
+      test "links and unlinks on register/unregister", %{registry: registry} do
+        {:ok, pid} = Registry.register(registry, "hello", :value)
+        {:links, links} = Process.info(self(), :links)
+        assert pid in links
+
+        {:ok, pid} = Registry.register(registry, "world", :value)
+        {:links, links} = Process.info(self(), :links)
+        assert pid in links
+
+        :ok = Registry.unregister(registry, "hello")
+        {:links, links} = Process.info(self(), :links)
+        assert pid in links
+
+        :ok = Registry.unregister(registry, "world")
+        {:links, links} = Process.info(self(), :links)
+        refute pid in links
       end
 
       test "cleans up tables on process crash", %{registry: registry, partitions: partitions} do
@@ -79,6 +107,12 @@ defmodule RegistryTest do
           GenServer.call(partition, :sync)
           assert :ets.tab2list(key) == []
           assert :ets.tab2list(pid) == []
+        end
+      end
+
+      test "raises on unknown registry name" do
+        assert_raise ArgumentError, ~r/unknown registry/, fn ->
+          Registry.register(:unknown, "hello", :value)
         end
       end
     end
@@ -112,6 +146,41 @@ defmodule RegistryTest do
         assert Registry.keys(registry, task) == []
       end
 
+      test "allows process unregistering", %{registry: registry} do
+        {:ok, _} = Registry.register(registry, "hello", :value)
+        {:ok, _} = Registry.register(registry, "hello", :value)
+        {:ok, _} = Registry.register(registry, "world", :value)
+        assert Registry.keys(registry, self()) |> Enum.sort() == ["hello", "hello", "world"]
+
+        :ok = Registry.unregister(registry, "hello")
+        assert Registry.keys(registry, self()) == ["world"]
+
+        :ok = Registry.unregister(registry, "world")
+        assert Registry.keys(registry, self()) == []
+      end
+
+      test "allows unregistering with no entries", %{registry: registry} do
+        assert Registry.unregister(registry, "hello") == :ok
+      end
+
+      test "links and unlinks on register/unregister", %{registry: registry} do
+        {:ok, pid} = Registry.register(registry, "hello", :value)
+        {:links, links} = Process.info(self(), :links)
+        assert pid in links
+
+        {:ok, pid} = Registry.register(registry, "world", :value)
+        {:links, links} = Process.info(self(), :links)
+        assert pid in links
+
+        :ok = Registry.unregister(registry, "hello")
+        {:links, links} = Process.info(self(), :links)
+        assert pid in links
+
+        :ok = Registry.unregister(registry, "world")
+        {:links, links} = Process.info(self(), :links)
+        refute pid in links
+      end
+
       test "cleans up tables on process crash", %{registry: registry, partitions: partitions} do
         {_, task1} = register_task(registry, "hello", :value)
         {_, task2} = register_task(registry, "world", :value)
@@ -126,16 +195,20 @@ defmodule RegistryTest do
           assert :ets.tab2list(pid) == []
         end
       end
+
+      test "raises on unknown registry name" do
+        assert_raise ArgumentError, ~r/unknown registry/, fn ->
+          Registry.register(:unknown, "hello", :value)
+        end
+      end
     end
   end
 
-  defp register_task(registry, key, value, opts \\ []) do
+  defp register_task(registry, key, value) do
     parent = self()
     {:ok, task} =
       Task.start(fn ->
-        {:ok, owner} = Registry.register(registry, key, value)
-        opts[:link] && Process.link(owner)
-        send(parent, {:ok, owner})
+        send(parent, Registry.register(registry, key, value))
         Process.sleep(:infinity)
       end)
     assert_receive {:ok, owner}
