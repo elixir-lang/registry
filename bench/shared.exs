@@ -3,7 +3,7 @@ defmodule Shared do
 
   def register(names) do
     :lists.foreach(fn name ->
-      Agent.start_link(fn -> [] end, name: name)
+      {:ok, _} = Agent.start_link(fn -> [] end, name: name)
     end, names)
     :ok
   end
