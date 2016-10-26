@@ -194,14 +194,14 @@ defmodule Registry do
     * `:partitions` - the number of partitions in the registry. Defaults to 1.
     * `:listeners` - a list of named processes which are notified of `:register`
       and `:unregister` events
-    * `:info` - a keyword list of information to be attached to the registry.
+    * `:meta` - a keyword list of metadata to be attached to the registry.
 
   """
   @spec start_link(kind, registry, Keyword.t) :: {:ok, pid} | {:error, term}
   def start_link(kind, registry, options \\ []) when kind in @kind and is_atom(registry) do
-    info = Keyword.get(options, :info, [])
-    unless Keyword.keyword?(info) do
-      raise ArgumentError, "expected :info to be a keyword list, got: #{inspect info}"
+    meta = Keyword.get(options, :meta, [])
+    unless Keyword.keyword?(meta) do
+      raise ArgumentError, "expected :meta to be a keyword list, got: #{inspect meta}"
     end
 
     partitions = Keyword.get(options, :partitions, 1)
@@ -214,7 +214,7 @@ defmodule Registry do
       raise ArgumentError, "expected :listeners to be a list of named processes, got: #{inspect listeners}"
     end
 
-    entries = [{@info, {kind, partitions}}, {@listeners, listeners} | info]
+    entries = [{@info, {kind, partitions}}, {@listeners, listeners} | meta]
     Registry.Supervisor.start_link(kind, registry, partitions, entries)
   end
 
@@ -604,15 +604,15 @@ defmodule Registry do
 
   ## Examples
 
-      iex> Registry.start_link(:unique, Registry.InfoDocTest, info: [custom_key: "custom_value"])
-      iex> Registry.info(Registry.InfoDocTest, :custom_key)
+      iex> Registry.start_link(:unique, Registry.InfoDocTest, meta: [custom_key: "custom_value"])
+      iex> Registry.meta(Registry.InfoDocTest, :custom_key)
       {:ok, "custom_value"}
-      iex> Registry.info(Registry.InfoDocTest, :unknown_key)
+      iex> Registry.meta(Registry.InfoDocTest, :unknown_key)
       :error
 
   """
-  @spec info(registry, info_key :: atom) :: {:ok, info_value :: term} | :error
-  def info(registry, key) when is_atom(registry) and is_atom(key) do
+  @spec meta(registry, meta_key :: atom) :: {:ok, meta_value :: term} | :error
+  def meta(registry, key) when is_atom(registry) and is_atom(key) do
     try do
       :ets.lookup(registry, key)
     catch
@@ -633,14 +633,14 @@ defmodule Registry do
   ## Examples
 
       iex> Registry.start_link(:unique, Registry.InfoDocTest)
-      iex> Registry.put_info(Registry.InfoDocTest, :custom_key, "custom_value")
+      iex> Registry.put_meta(Registry.InfoDocTest, :custom_key, "custom_value")
       :ok
-      iex> Registry.info(Registry.InfoDocTest, :custom_key)
+      iex> Registry.meta(Registry.InfoDocTest, :custom_key)
       {:ok, "custom_value"}
 
   """
-  @spec put_info(registry, info_key :: atom, info_value :: term) :: :ok
-  def put_info(registry, key, value) when is_atom(registry) and is_atom(key) do
+  @spec put_meta(registry, meta_key :: atom, meta_value :: term) :: :ok
+  def put_meta(registry, key, value) when is_atom(registry) and is_atom(key) do
     try do
       :ets.insert(registry, {key, value})
       :ok

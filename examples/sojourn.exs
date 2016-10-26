@@ -59,7 +59,7 @@ defmodule Registry.Sojourn do
 
     sojourn  = Module.concat(name, "Sojourn")
     worker   = [name: sojourn]
-    registry = [listeners: [sojourn], info: [sojourn: pool_size],
+    registry = [listeners: [sojourn], meta: [sojourn: pool_size],
                 partitions: Keyword.get(options, :partitions, 1)]
 
     children = [
