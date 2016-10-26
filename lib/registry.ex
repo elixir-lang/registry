@@ -113,6 +113,8 @@ defmodule Registry do
   # TODO: Decide if it should be started as part of Elixir's supervision tree.
 
   @kind [:unique, :duplicate]
+  @info -1
+  @listeners -2
 
   @type registry :: atom
   @type kind :: :unique | :duplicate
@@ -140,7 +142,7 @@ defmodule Registry do
 
   @doc false
   def register_name({registry, key}, pid) when pid == self() do
-    case register(registry, key, 0) do
+    case register(registry, key, nil) do
       {:ok, _} -> :yes
       {:error, _} -> :no
     end
@@ -187,21 +189,33 @@ defmodule Registry do
 
   ## Options
 
-  `options` is a keyword list with metadata that is stored in the
-  registry and may be looked up using the `info/2` function. Only
-  the following keys have meaning for the registry:
+  The registry supports the following options:
 
     * `:partitions` - the number of partitions in the registry. Defaults to 1.
+    * `:listeners` - a list of named processes which are notified of `:register`
+      and `:unregister` events
+    * `:info` - a keyword list of information to be attached to the registry.
 
-  All other keys are stored as is.
   """
   @spec start_link(kind, registry, Keyword.t) :: {:ok, pid} | {:error, term}
   def start_link(kind, registry, options \\ []) when kind in @kind and is_atom(registry) do
-    unless Keyword.keyword?(options) do
-      raise ArgumentError, "expected Registry options to be a keyword list, got: #{inspect options}"
+    info = Keyword.get(options, :info, [])
+    unless Keyword.keyword?(info) do
+      raise ArgumentError, "expected :info to be a keyword list, got: #{inspect info}"
     end
-    options = Keyword.put_new(options, :partitions, 1)
-    Registry.Supervisor.start_link(kind, registry, options)
+
+    partitions = Keyword.get(options, :partitions, 1)
+    unless is_integer(partitions) and partitions >= 1 do
+      raise ArgumentError, "expected :partitions to be a positive integer, got: #{inspect partitions}"
+    end
+
+    listeners = Keyword.get(options, :listeners, [])
+    unless is_list(listeners) and Enum.all?(listeners, &is_atom/1) do
+      raise ArgumentError, "expected :listeners to be a list of named processes, got: #{inspect listeners}"
+    end
+
+    entries = [{@info, {kind, partitions}}, {@listeners, listeners} | info]
+    Registry.Supervisor.start_link(kind, registry, partitions, entries)
   end
 
   @doc """
@@ -490,6 +504,11 @@ defmodule Registry do
       0 -> Process.unlink(pid_server)
       _ -> :ok
     end
+
+    for listener <- listeners!(registry) do
+      Kernel.send(listener, {:unregister, registry, key, self})
+    end
+
     :ok
   end
 
@@ -545,7 +564,15 @@ defmodule Registry do
     # key one and the process crashes, the key will stay there forever.
     Process.link(pid_server)
     true = :ets.insert(pid_ets, {self, key, key_ets})
-    register_key(kind, pid_server, key_ets, key, {key, {self, value}})
+    case register_key(kind, pid_server, key_ets, key, {key, {self, value}}) do
+      {:ok, _} = ok ->
+        for listener <- listeners!(registry) do
+          Kernel.send(listener, {:register, registry, key, self, value})
+        end
+        ok
+      {:error, _} = error ->
+        error
+    end
   end
 
   defp register_key(:duplicate, pid_server, key_ets, _key, entry) do
@@ -577,7 +604,7 @@ defmodule Registry do
 
   ## Examples
 
-      iex> Registry.start_link(:unique, Registry.InfoDocTest, custom_key: "custom_value")
+      iex> Registry.start_link(:unique, Registry.InfoDocTest, info: [custom_key: "custom_value"])
       iex> Registry.info(Registry.InfoDocTest, :custom_key)
       {:ok, "custom_value"}
       iex> Registry.info(Registry.InfoDocTest, :unknown_key)
@@ -600,15 +627,16 @@ defmodule Registry do
   @doc """
   Stores registry metadata.
 
+  It is not possible to update the values for registry own's metadata,
+  such as `:partitions` and `:listeners`.
+
   ## Examples
 
-      iex> Registry.start_link(:unique, Registry.InfoDocTest, custom_key: "custom_value")
-      iex> Registry.info(Registry.InfoDocTest, :custom_key)
-      {:ok, "custom_value"}
-      iex> Registry.put_info(Registry.InfoDocTest, :custom_key, "new_value")
+      iex> Registry.start_link(:unique, Registry.InfoDocTest)
+      iex> Registry.put_info(Registry.InfoDocTest, :custom_key, "custom_value")
       :ok
       iex> Registry.info(Registry.InfoDocTest, :custom_key)
-      {:ok, "new_value"}
+      {:ok, "custom_value"}
 
   """
   @spec put_info(registry, info_key :: atom, info_value :: term) :: :ok
@@ -626,13 +654,15 @@ defmodule Registry do
 
   defp info!(registry) do
     try do
-      :ets.lookup(registry, :__info__)
+      :ets.lookup_element(registry, @info, 2)
     catch
       :error, :badarg ->
         raise ArgumentError, "unknown registry: #{inspect registry}"
-    else
-      [{:__info__, kind, partitions}] -> {kind, partitions}
     end
+  end
+
+  defp listeners!(registry) do
+    :ets.lookup_element(registry, @listeners, 2)
   end
 
   defp key_ets!(registry, partition) do
@@ -648,15 +678,13 @@ defmodule Registry.Supervisor do
   @moduledoc false
   use Supervisor
 
-  def start_link(kind, registry, options) do
-    Supervisor.start_link(__MODULE__, {kind, registry, options}, name: registry)
+  def start_link(kind, registry, partitions, entries) do
+    Supervisor.start_link(__MODULE__, {kind, registry, partitions, entries}, name: registry)
   end
 
-  def init({kind, registry, options}) do
-    partitions = Keyword.get(options, :partitions, 1)
+  def init({kind, registry, partitions, entries}) do
     ^registry = :ets.new(registry, [:set, :public, :named_table, read_concurrency: true])
-    true = :ets.insert(registry, options)
-    true = :ets.insert(registry, {:__info__, kind, partitions})
+    true = :ets.insert(registry, entries)
 
     children =
       for i <- 0..partitions-1 do
