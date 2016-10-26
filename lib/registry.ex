@@ -75,7 +75,7 @@ defmodule Registry do
   In this example, we will also set the number of partitions to the
   number of schedulers online, which will make the registry more performant
   on highly concurrent environments and allowing dispatching to happen
-  in parellel:
+  in parallel:
 
       iex> {:ok, _} = Registry.start_link(:duplicate, Registry.PubSubTest,
       ...>                                partitions: System.schedulers_online)
@@ -211,8 +211,8 @@ defmodule Registry do
   per partition **concurrently**. The callback, however, won't be
   invoked if there are no entries for that particular partition.
 
-  Keep in mind the `dispatch/3` function may return that have died
-  but not yet removed from the table. If this can be of an issue,
+  Keep in mind the `dispatch/3` function may return entries that have died
+  but have not yet been removed from the table. If this can be an issue,
   consider explicitly checking if the process is alive in the entries
   table. Remember there are no guarantees though, after all, the
   process may also crash right after the `Process.alive?/1` check.
