@@ -1,6 +1,6 @@
 defmodule Registry do
   @moduledoc """
-  A local, descentralized and scalable key-value process storage.
+  A local, decentralized and scalable key-value process storage.
 
   It allows developers to lookup one or more process with a given key.
   If the registry has `:unique` keys, a key points to 0 or 1 processes.
@@ -202,6 +202,49 @@ defmodule Registry do
     end
     options = Keyword.put_new(options, :partitions, 1)
     Registry.Supervisor.start_link(kind, registry, options)
+  end
+
+  @doc """
+  Updates the value for `key` for the current process in the unique `registry`.
+
+  Returns the `{old_value, new_value}` or `:error` if there
+  is no such key assigned to the current process.
+
+  If a non-unique registry is given, an error is raised.
+
+  ## Examples
+
+      iex> Registry.start_link(:unique, Registry.UpdateTest)
+      iex> {:ok, _} = Registry.register(Registry.UpdateTest, "hello", 1)
+      iex> Registry.lookup(Registry.UpdateTest, "hello")
+      [{self(), 1}]
+      iex> Registry.update(Registry.UpdateTest, "hello", & &1 + 1)
+      {2, 1}
+      iex> Registry.lookup(Registry.UpdateTest, "hello")
+      [{self(), 2}]
+
+  """
+  @spec update(registry, key, (value -> value)) :: {new_value :: term, old_value :: term} | :error
+  def update(registry, key, callback) when is_atom(registry) and is_function(callback, 1) do
+    case info!(registry) do
+      {:unique, partitions} ->
+        key_partition = :erlang.phash2(key, partitions)
+        key_ets = key_ets!(registry, key_partition)
+        try do
+          :ets.lookup_element(key_ets, key, 2)
+        catch
+          :error, :badarg -> :error
+        else
+          {pid, old_value} when pid == self() ->
+            new_value = callback.(old_value)
+            :ets.insert(key_ets, {key, {pid, new_value}})
+            {new_value, old_value}
+          {_, _} ->
+            :error
+        end
+      {kind, _} ->
+        raise ArgumentError, "Registry.update/3 is not supported for #{kind} registries"
+    end
   end
 
   @doc """
@@ -530,7 +573,7 @@ defmodule Registry do
   end
 
   @doc """
-  Reads registry options given on `start_link/3`.
+  Reads registry metadata given on `start_link/3`.
 
   ## Examples
 
@@ -551,6 +594,31 @@ defmodule Registry do
     else
       [{^key, value}] -> {:ok, value}
       _ -> :error
+    end
+  end
+
+  @doc """
+  Stores registry metadata.
+
+  ## Examples
+
+      iex> Registry.start_link(:unique, Registry.InfoDocTest, custom_key: "custom_value")
+      iex> Registry.info(Registry.InfoDocTest, :custom_key)
+      {:ok, "custom_value"}
+      iex> Registry.put_info(Registry.InfoDocTest, :custom_key, "new_value")
+      :ok
+      iex> Registry.info(Registry.InfoDocTest, :custom_key)
+      {:ok, "new_value"}
+
+  """
+  @spec put_info(registry, info_key :: atom, info_value :: term) :: :ok
+  def put_info(registry, key, value) when is_atom(registry) and is_atom(key) do
+    try do
+      :ets.insert(registry, {key, value})
+      :ok
+    catch
+      :error, :badarg ->
+        raise ArgumentError, "unknown registry: #{inspect registry}"
     end
   end
 

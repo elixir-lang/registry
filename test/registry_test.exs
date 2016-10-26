@@ -43,6 +43,17 @@ defmodule RegistryTest do
         assert Registry.lookup(registry, "hello") == [{self(), :other}]
       end
 
+      test "updates current process value", %{registry: registry} do
+        assert Registry.update(registry, "hello", &raise/1) == :error
+        register_task(registry, "hello", :value)
+        assert Registry.update(registry, "hello", &raise/1) == :error
+
+        Registry.register(registry, "world", 1)
+        assert Registry.lookup(registry, "world") == [{self(), 1}]
+        assert Registry.update(registry, "world", & &1 + 1) == {2, 1}
+        assert Registry.lookup(registry, "world") == [{self(), 2}]
+      end
+
       test "looks up process considering liveness", %{registry: registry} do
         assert Registry.lookup(registry, "hello") == []
         {owner, task} = register_task(registry, "hello", :value)
