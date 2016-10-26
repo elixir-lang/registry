@@ -697,7 +697,7 @@ defmodule Registry.Partition do
   """
   @spec key_name(atom, non_neg_integer) :: atom
   def key_name(registry, partition) do
-    Module.concat([registry, "KeyPartition" <> Integer.to_string(partition)])
+    Module.concat(registry, "KeyPartition" <> Integer.to_string(partition))
   end
 
   @doc """
@@ -705,7 +705,7 @@ defmodule Registry.Partition do
   """
   @spec pid_name(atom, non_neg_integer) :: atom
   def pid_name(name, partition) do
-    Module.concat([name, "PIDPartition" <> Integer.to_string(partition)])
+    Module.concat(name, "PIDPartition" <> Integer.to_string(partition))
   end
 
   @doc """
