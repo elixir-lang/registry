@@ -201,21 +201,17 @@ defmodule Registry do
 
   The list of `entries` is a non-empty list of two-element tuples where
   the first element is the pid and the second element is the value
-  associated to the pid.
+  associated to the pid. If there are no entries for the given key,
+  the callback is never invoked.
 
-  If the registry has unique keys, the callback function will be
-  invoked only if it has a matching entry for key. The entries list
-  will then contain a single element.
-
-  If the registry has duplicate keys, the callback will be invoked
-  per partition **concurrently**. The callback, however, won't be
-  invoked if there are no entries for that particular partition.
+  If the registry is partitioned, the callback will be invoked for
+  every partition that has matching entries **concurrently**.
 
   Keep in mind the `dispatch/3` function may return entries that have died
   but have not yet been removed from the table. If this can be an issue,
   consider explicitly checking if the process is alive in the entries
-  table. Remember there are no guarantees though, after all, the
-  process may also crash right after the `Process.alive?/1` check.
+  list. Remember there are no guarantees the process will remain alive, after
+  all the process may also crash right after the `Process.alive?/1` check.
 
   See the module documentation for examples of using the `dispatch/3`
   function for building custom dispatching or a pubsub system.
