@@ -1,5 +1,5 @@
 defmodule RegistryTest do
-  use ExUnit.Case, asycn: true
+  use ExUnit.Case, async: true
   doctest Registry, except: [:moduledoc]
 
   setup config do

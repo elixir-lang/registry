@@ -55,11 +55,15 @@ defmodule Registry do
       # Prints #PID<...>
       :ok
 
-  By calling `register/3` different processes can register under a given
-  key and associate a specific `{module, function}` tuple under that key.
-  Later on, an entity interested in dispatching events, may call `dispatch/3`,
-  which will receive all entries under a given key, allowing the each
-  `{module, function}` to be invoked.
+  By calling `register/3` different processes can register under a given key
+  and associate any value under that key. In the case of the example above a
+  process registers a specific `{module, function}` tuple under the key
+  `"hello"`.  Later on, an entity interested in dispatching events, may call
+  `dispatch/3`, which will receive a list of all the values registered with the
+  requested key, as well as the pid of the process that registered that value,
+  in the form of a tuple matching `{pid, value}`.  In the example above the
+  value registered is a `{module, function}` tuple, allowing each entry to be
+  invoked by the calling process.
 
   Keep in mind dispatching happens in the process that calls `dispatch/3`,
   registered processes are not involved in dispatching unless they are
@@ -72,10 +76,10 @@ defmodule Registry do
   the previous section, except we will send messages to each associated
   process, instead of invoking a given module-function.
 
-  In this example, we will also set the number of partitions to the
-  number of schedulers online, which will make the registry more performant
-  on highly concurrent environments and allowing dispatching to happen
-  in parallel:
+  In this example, we will also set the number of partitions to the number of
+  schedulers online, which will make the registry more performant on highly
+  concurrent environments as each partition with spawn a new process, allowing
+  dispatching to happen in parallel:
 
       iex> {:ok, _} = Registry.start_link(:duplicate, Registry.PubSubTest,
       ...>                                partitions: System.schedulers_online)
