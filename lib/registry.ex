@@ -123,9 +123,18 @@ defmodule Registry do
 
   @doc false
   def whereis_name({registry, key}) do
-    case whereis(registry, key) do
-      {pid, _} -> pid
-      :error -> :undefined
+    case info!(registry) do
+      {:unique, partitions} ->
+        key_partition = :erlang.phash2(key, partitions)
+        key_ets = key_ets!(registry, key_partition)
+        case lookup_pid_values(key_ets, key) do
+          {pid, _} ->
+            if Process.alive?(pid), do: pid, else: :undefined
+          _ ->
+            :undefined
+        end
+      {kind, _} ->
+        raise ArgumentError, ":via is not supported for #{kind} registries"
     end
   end
 
@@ -139,9 +148,9 @@ defmodule Registry do
 
   @doc false
   def send({registry, key}, msg) do
-    case whereis(registry, key) do
-      {pid, _} -> Kernel.send(pid, msg)
-      :error -> :erlang.error(:badarg, [{registry, key}, msg])
+    case lookup(registry, key) do
+      [{pid, _}] -> Kernel.send(pid, msg)
+      [] -> :erlang.error(:badarg, [{registry, key}, msg])
     end
   end
 
@@ -271,43 +280,66 @@ defmodule Registry do
   end
 
   @doc """
-  Finds the process for the given `key` in the unique `registry`.
+  Finds the `{pid, value}` pair for the given `key` in `registry` in no particular order.
 
-  Returns `{pid, value}` if the registered `pid` is alive where
-  `value` is the term associated to the pid on registration. Otherwise
-  it returns `nil`.
+  The pid-value pair is only returned if the pid is alive. An empty list
+  will be returned if there is no alive pid registered under this key.
 
-  `ArgumentError` will be raised if a non-unique registry is given.
+  For unique registries, a single partition lookup is necessary. For
+  duplicate registries, all partitions must be looked up.
 
   ## Examples
 
   In the example below we register the current process and look it up
-  both from itself and other processes.
+  both from itself and other processes:
 
-      iex> Registry.start_link(:unique, Registry.WhereIsTest)
-      iex> Registry.whereis(Registry.WhereIsTest, "hello")
-      :error
-      iex> {:ok, _} = Registry.register(Registry.WhereIsTest, "hello", :world)
-      iex> Registry.whereis(Registry.WhereIsTest, "hello")
-      {self(), :world}
-      iex> Task.async(fn -> Registry.whereis(Registry.WhereIsTest, "hello") end) |> Task.await
-      {self(), :world}
+      iex> Registry.start_link(:unique, Registry.UniqueLookupTest)
+      iex> Registry.lookup(Registry.UniqueLookupTest, "hello")
+      []
+      iex> {:ok, _} = Registry.register(Registry.UniqueLookupTest, "hello", :world)
+      iex> Registry.lookup(Registry.UniqueLookupTest, "hello")
+      [{self(), :world}]
+      iex> Task.async(fn -> Registry.lookup(Registry.UniqueLookupTest, "hello") end) |> Task.await
+      [{self(), :world}]
+
+  The same applies to duplicate registries:
+
+      iex> Registry.start_link(:duplicate, Registry.DuplicateLookupTest)
+      iex> Registry.lookup(Registry.DuplicateLookupTest, "hello")
+      []
+      iex> {:ok, _} = Registry.register(Registry.DuplicateLookupTest, "hello", :world)
+      iex> Registry.lookup(Registry.DuplicateLookupTest, "hello")
+      [{self(), :world}]
+      iex> {:ok, _} = Registry.register(Registry.DuplicateLookupTest, "hello", :another)
+      iex> Enum.sort(Registry.lookup(Registry.DuplicateLookupTest, "hello"))
+      [{self(), :another}, {self(), :world}]
 
   """
-  @spec whereis(registry, key) :: {pid, value} | :error
-  def whereis(registry, key) when is_atom(registry) do
+  @spec lookup(registry, key) :: [{pid, value}]
+  def lookup(registry, key) when is_atom(registry) do
     case info!(registry) do
       {:unique, partitions} ->
         key_partition = :erlang.phash2(key, partitions)
         key_ets = key_ets!(registry, key_partition)
-        case :ets.lookup(key_ets, key) do
-          [{^key, {pid, _} = pair}] ->
-            if Process.alive?(pid), do: pair, else: :error
-          [] ->
-            :error
+        case lookup_pid_values(key_ets, key) do
+          {pid, _} = pair ->
+            if Process.alive?(pid), do: [pair], else: []
+          _ ->
+            []
         end
-      {kind, _} ->
-        raise ArgumentError, "Registry.whereis/2 not supported for #{kind} registries"
+      {:duplicate, partitions} ->
+        for i <- :lists.seq(0, partitions-1),
+            {pid, _} = pair <- lookup_pid_values(key_ets!(registry, i), key),
+            Process.alive?(pid),
+            do: pair
+    end
+  end
+
+  defp lookup_pid_values(ets, key) do
+    try do
+      :ets.lookup_element(ets, key, 2)
+    catch
+      :error, :badarg -> []
     end
   end
 
@@ -504,12 +536,12 @@ defmodule Registry do
 
       iex> Registry.start_link(:unique, Registry.InfoDocTest, custom_key: "custom_value")
       iex> Registry.info(Registry.InfoDocTest, :custom_key)
-      {:custom_key, "custom_value"}
+      {:ok, "custom_value"}
       iex> Registry.info(Registry.InfoDocTest, :unknown_key)
       :error
 
   """
-  @spec info(registry, info_key :: atom) :: {info_key :: atom, info_value :: term} | :error
+  @spec info(registry, info_key :: atom) :: {:ok, info_value :: term} | :error
   def info(registry, key) when is_atom(registry) and is_atom(key) do
     try do
       :ets.lookup(registry, key)
@@ -517,7 +549,7 @@ defmodule Registry do
       :error, :badarg ->
         raise ArgumentError, "unknown registry: #{inspect registry}"
     else
-      [{^key, _} = pair] -> pair
+      [{^key, value}] -> {:ok, value}
       _ -> :error
     end
   end

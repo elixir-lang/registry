@@ -40,17 +40,17 @@ defmodule RegistryTest do
         :sys.suspend(owner)
         kill_and_assert_down(task)
         Registry.register(registry, "hello", :other)
-        assert Registry.whereis(registry, "hello") == {self(), :other}
+        assert Registry.lookup(registry, "hello") == [{self(), :other}]
       end
 
-      test "finds whereis process considering liveness", %{registry: registry} do
-        assert Registry.whereis(registry, "hello") == :error
+      test "looks up process considering liveness", %{registry: registry} do
+        assert Registry.lookup(registry, "hello") == []
         {owner, task} = register_task(registry, "hello", :value)
-        assert Registry.whereis(registry, "hello") == {task, :value}
+        assert Registry.lookup(registry, "hello") == [{task, :value}]
 
         :sys.suspend(owner)
         kill_and_assert_down(task)
-        assert Registry.whereis(registry, "hello") == :error
+        assert Registry.lookup(registry, "hello") == []
       end
 
       test "returns process keys considering liveness", %{registry: registry} do
@@ -179,6 +179,20 @@ defmodule RegistryTest do
         assert Registry.keys(registry, self()) |> Enum.sort() == ["hello", "hello", "world"]
       end
 
+      test "looks up process considering liveness", %{registry: registry} do
+        assert Registry.lookup(registry, "hello") == []
+        {owner, task} = register_task(registry, "hello", :value)
+        assert Registry.lookup(registry, "hello") == [{task, :value}]
+
+        Registry.register(registry, "hello", :local)
+        assert Registry.lookup(registry, "hello") |> Enum.sort ==
+               [{self(), :local}, {task, :value}]
+
+        :sys.suspend(owner)
+        kill_and_assert_down(task)
+        assert Registry.lookup(registry, "hello") == [{self(), :local}]
+      end
+
       test "returns process keys considering liveness", %{registry: registry} do
         assert Registry.keys(registry, self()) == []
         {owner, task} = register_task(registry, "hello", :value)
@@ -272,7 +286,7 @@ defmodule RegistryTest do
       end
 
       test "raises if attempt to be used on via", %{registry: registry} do
-        assert_raise ArgumentError, "Registry.whereis/2 not supported for duplicate registries", fn ->
+        assert_raise ArgumentError, ":via is not supported for duplicate registries", fn ->
           name = {:via, Registry, {registry, "hello"}}
           Agent.start_link(fn -> 0 end, name: name)
         end
