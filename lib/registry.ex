@@ -78,7 +78,7 @@ defmodule Registry do
 
   In this example, we will also set the number of partitions to the number of
   schedulers online, which will make the registry more performant on highly
-  concurrent environments as each partition with spawn a new process, allowing
+  concurrent environments as each partition will spawn a new process, allowing
   dispatching to happen in parallel:
 
       iex> {:ok, _} = Registry.start_link(:duplicate, Registry.PubSubTest,
