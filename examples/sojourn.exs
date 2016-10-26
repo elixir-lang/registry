@@ -53,7 +53,8 @@ defmodule Registry.Sojourn do
     * `:partitions` - how many partitions in the registry
 
   """
-  def start_link(name, pool_size, options \\ []) do
+  def start_link(name, pool_size, options \\ [])
+      when is_atom(name) and is_integer(pool_size) and pool_size > 0 do
     import Supervisor.Spec
 
     sojourn  = Module.concat(name, "Sojourn")
@@ -111,7 +112,7 @@ defmodule Registry.Sojourn do
   def send(key, msg) do
     case whereis_name(key) do
       :undefined -> :erlang.error(:badarg, [key, msg])
-      pid -> send(pid, msg)
+      pid -> Kernel.send(pid, msg)
     end
   end
 
@@ -125,7 +126,7 @@ defmodule Registry.Sojourn do
     {:ok, %{name: name, pool_size: pool_size, pids: []}}
   end
 
-  def handle_info({:subscribe, _, key, pid, _value}, state) do
+  def handle_info({:subscribe, _, key, pid, _value}, %{pool_size: pool_size} = state) do
     case key do
       {_, id} when id in 0..pool_size-1 ->
         :ok
@@ -138,11 +139,11 @@ defmodule Registry.Sojourn do
   def handle_info({:unsubscribe, _, key, pid}, state) do
     {:noreply, update_in(state.pids, &List.delete(&1, {pid, key}))}
   end
-  def handle_info({:sample, interval}, %{pids: pids} = state) do
+  def handle_info({:sample, interval}, %{pids: pids, name: name} = state) do
     time = System.system_time
 
     for {pid, key} <- pids do
-      send(pid, {:sample, __MODULE__, {name, key, time}})
+      Kernel.send(pid, {:sample, __MODULE__, {name, key, time}})
     end
 
     send_sample(interval)
