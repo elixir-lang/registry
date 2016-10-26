@@ -15,6 +15,7 @@ defmodule ErlangRegistry do
 end
 
 tasks = String.to_integer System.get_env("TASKS") || "1"
+IO.puts "Registering #{tasks} x 10000 entries"
 
 names =
   for task <- 1..tasks do
@@ -26,3 +27,5 @@ names =
   |> Enum.map(&Task.async(Shared, :register, [&1]))
   |> Enum.each(&Task.await(&1, :infinity))
 end) |> IO.inspect
+
+Shared.check(names)

@@ -7,4 +7,14 @@ defmodule Shared do
     end, names)
     :ok
   end
+
+  def check(names) do
+    IO.write "Checking... "
+    missing =
+      for name_list <- names,
+          name <- name_list,
+          !GenServer.whereis(name),
+          do: :oops
+    IO.puts "missing #{length missing} entries."
+  end
 end
