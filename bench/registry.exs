@@ -7,7 +7,7 @@ partitions = String.to_integer System.get_env("PARTITIONS") || "1"
 Registry.start_link(:unique, Registry, partitions: partitions)
 
 tasks = String.to_integer System.get_env("TASKS") || "1"
-IO.puts "Registering #{tasks} x 10000 entries (using #{partitions} partitions)"
+IO.puts "registry (#{partitions}p): registering #{tasks} x 10000 entries"
 
 names =
   for task <- 1..tasks do

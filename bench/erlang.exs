@@ -15,7 +15,7 @@ defmodule ErlangRegistry do
 end
 
 tasks = String.to_integer System.get_env("TASKS") || "1"
-IO.puts "Registering #{tasks} x 10000 entries"
+IO.puts "erlang: registering #{tasks} x 10000 entries"
 
 names =
   for task <- 1..tasks do
