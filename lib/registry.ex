@@ -1,6 +1,6 @@
 defmodule Registry do
   @moduledoc """
-  A local and scalable key-value process storage.
+  A local, descentralized and scalable key-value process storage.
 
   It allows developers to lookup one or more process with a given key.
   If the registry has `:unique` keys, a key points to 0 or 1 processes.
