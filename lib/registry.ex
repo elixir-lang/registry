@@ -683,9 +683,8 @@ defmodule Registry do
   end
 
   defp unlink_if_unregistered(pid_server, pid_ets, self) do
-    case :ets.select_count(pid_ets, [{{self, :_, :_}, [], [true]}]) do
-      0 -> Process.unlink(pid_server)
-      _ -> :ok
+    unless :ets.member(pid_ets, self) do
+      Process.unlink(pid_server)
     end
   end
 end
