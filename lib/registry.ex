@@ -1,5 +1,5 @@
 defmodule Registry do
-  @moduledoc """
+  @moduledoc ~S"""
   A local, decentralized and scalable key-value process storage.
 
   It allows developers to lookup one or more process with a given key.
@@ -218,7 +218,8 @@ defmodule Registry do
 
     * `:partitions` - the number of partitions in the registry. Defaults to 1.
     * `:listeners` - a list of named processes which are notified of `:register`
-      and `:unregister` events
+      and `:unregister` events. The registered process must be monitored by the
+      listener if it wants to be notified of crashes.
     * `:meta` - a keyword list of metadata to be attached to the registry.
 
   """
