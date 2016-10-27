@@ -130,16 +130,15 @@ defmodule Registry do
   @doc false
   def whereis_name({registry, key}) do
     case info!(registry) do
-      {:unique, partitions} ->
-        key_partition = :erlang.phash2(key, partitions)
-        key_ets = key_ets!(registry, key_partition)
-        case lookup_pid_values(key_ets, key) do
+      {:unique, partitions, key_ets, _pid_ets} ->
+        key_ets = key_ets || key_ets!(registry, key, partitions)
+        case safe_lookup_second(key_ets, key) do
           {pid, _} ->
             if Process.alive?(pid), do: pid, else: :undefined
           _ ->
             :undefined
         end
-      {kind, _} ->
+      {kind, _, _, _} ->
         raise ArgumentError, ":via is not supported for #{kind} registries"
     end
   end
@@ -218,7 +217,8 @@ defmodule Registry do
       raise ArgumentError, "expected :listeners to be a list of named processes, got: #{inspect listeners}"
     end
 
-    entries = [{@info, {kind, partitions}}, {@listeners, listeners} | meta]
+    # The @info format must be kept in sync with Registry.Partition optimization.
+    entries = [{@info, {kind, partitions, nil, nil}}, {@listeners, listeners} | meta]
     Registry.Supervisor.start_link(kind, registry, partitions, entries)
   end
 
@@ -245,9 +245,8 @@ defmodule Registry do
   @spec update(registry, key, (value -> value)) :: {new_value :: term, old_value :: term} | :error
   def update(registry, key, callback) when is_atom(registry) and is_function(callback, 1) do
     case info!(registry) do
-      {:unique, partitions} ->
-        key_partition = :erlang.phash2(key, partitions)
-        key_ets = key_ets!(registry, key_partition)
+      {:unique, partitions, key_ets, _} ->
+        key_ets = key_ets || key_ets!(registry, key, partitions)
         try do
           :ets.lookup_element(key_ets, key, 2)
         catch
@@ -260,7 +259,7 @@ defmodule Registry do
           {_, _} ->
             :error
         end
-      {kind, _} ->
+      {kind, _, _, _} ->
         raise ArgumentError, "Registry.update/3 is not supported for #{kind} registries"
     end
   end
@@ -291,29 +290,21 @@ defmodule Registry do
       when is_atom(registry) and is_function(mfa_or_fun, 1)
       when is_atom(registry) and tuple_size(mfa_or_fun) == 3 do
     case info!(registry) do
-      {:unique, partitions} ->
-        registry
-        |> dispatch_lookup(:erlang.phash2(key, partitions), key)
+      {:unique, partitions, key_ets, _pid_ets} ->
+        (key_ets || key_ets!(registry, key, partitions))
+        |> safe_lookup_second(key)
         |> List.wrap()
         |> apply_non_empty_to_mfa_or_fun(mfa_or_fun)
-      {:duplicate, 1} ->
-        registry
-        |> dispatch_lookup(0, key)
+      {:duplicate, 1, key_ets, _pid_ets} ->
+        key_ets
+        |> safe_lookup_second(key)
         |> apply_non_empty_to_mfa_or_fun(mfa_or_fun)
-      {:duplicate, partitions} ->
+      {:duplicate, partitions, _, _} ->
         registry
         |> dispatch_task(key, mfa_or_fun, partitions)
         |> Enum.each(&Task.await(&1, :infinity))
     end
     :ok
-  end
-
-  defp dispatch_lookup(registry, partition, key) do
-    try do
-      :ets.lookup_element(key_ets!(registry, partition), key, 2)
-    catch
-      :error, :badarg -> []
-    end
   end
 
   defp dispatch_task(_registry, _key, _mfa_or_fun, 0) do
@@ -323,7 +314,8 @@ defmodule Registry do
     partition = partition - 1
     task = Task.async(fn ->
       registry
-      |> dispatch_lookup(partition, key)
+      |> key_ets!(partition)
+      |> safe_lookup_second(key)
       |> apply_non_empty_to_mfa_or_fun(mfa_or_fun)
       :ok
     end)
@@ -379,28 +371,25 @@ defmodule Registry do
   @spec lookup(registry, key) :: [{pid, value}]
   def lookup(registry, key) when is_atom(registry) do
     case info!(registry) do
-      {:unique, partitions} ->
-        key_partition = :erlang.phash2(key, partitions)
-        key_ets = key_ets!(registry, key_partition)
-        case lookup_pid_values(key_ets, key) do
+      {:unique, partitions, key_ets, _pid_ets} ->
+        key_ets = key_ets || key_ets!(registry, key, partitions)
+        case safe_lookup_second(key_ets, key) do
           {pid, _} = pair ->
             if Process.alive?(pid), do: [pair], else: []
           _ ->
             []
         end
-      {:duplicate, partitions} ->
-        for i <- :lists.seq(0, partitions-1),
-            {pid, _} = pair <- lookup_pid_values(key_ets!(registry, i), key),
+
+      {:duplicate, 1, key_ets, _pid_ets} ->
+        for {pid, _} = pair <- safe_lookup_second(key_ets, key),
             Process.alive?(pid),
             do: pair
-    end
-  end
 
-  defp lookup_pid_values(ets, key) do
-    try do
-      :ets.lookup_element(ets, key, 2)
-    catch
-      :error, :badarg -> []
+      {:duplicate, partitions, _key_ets, _pid_ets} ->
+        for i <- :lists.seq(0, partitions-1),
+            {pid, _} = pair <- safe_lookup_second(key_ets!(registry, i), key),
+            Process.alive?(pid),
+            do: pair
     end
   end
 
@@ -438,21 +427,14 @@ defmodule Registry do
   """
   @spec keys(registry, pid) :: [key]
   def keys(registry, pid) when is_atom(registry) and is_pid(pid) do
-    {kind, partitions} = info!(registry)
-    pid_partition = :erlang.phash2(pid, partitions)
-    {_, pid_ets} = pid_ets!(registry, pid_partition)
+    {kind, partitions, _, pid_ets} = info!(registry)
+    {_, pid_ets} = pid_ets || pid_ets!(registry, pid, partitions)
+    keys = safe_lookup_second(pid_ets, pid)
 
-    try do
-      :ets.lookup_element(pid_ets, pid, 2)
-    catch
-      :error, :badarg -> []
-    else
-      keys ->
-        cond do
-          not Process.alive?(pid) -> []
-          kind == :unique -> Enum.uniq(keys)
-          true -> keys
-        end
+    cond do
+      not Process.alive?(pid) -> []
+      kind == :unique -> Enum.uniq(keys)
+      true -> keys
     end
   end
 
@@ -492,11 +474,10 @@ defmodule Registry do
   @spec unregister(registry, key) :: :ok
   def unregister(registry, key) when is_atom(registry) do
     self = self()
-    {kind, partitions} = info!(registry)
-    {key_partition, pid_partition} =
-      Registry.Partition.partitions(kind, key, self, partitions)
-    key_ets = key_ets!(registry, key_partition)
-    {pid_server, pid_ets} = pid_ets!(registry, pid_partition)
+    {kind, partitions, key_ets, pid_ets} = info!(registry)
+    {key_partition, pid_partition} = partitions(kind, key, self, partitions)
+    key_ets = key_ets || key_ets!(registry, key_partition)
+    {pid_server, pid_ets} = pid_ets || pid_ets!(registry, pid_partition)
 
     # Remove first from the key_ets because in case of crashes
     # the pid_ets will still be able to clean up. The last step is
@@ -554,11 +535,10 @@ defmodule Registry do
   @spec register(registry, key, value) :: {:ok, pid} | {:error, {:already_registered, pid}}
   def register(registry, key, value) when is_atom(registry) do
     self = self()
-    {kind, partitions} = info!(registry)
-    {key_partition, pid_partition} =
-      Registry.Partition.partitions(kind, key, self, partitions)
-    key_ets = key_ets!(registry, key_partition)
-    {pid_server, pid_ets} = pid_ets!(registry, pid_partition)
+    {kind, partitions, key_ets, pid_ets} = info!(registry)
+    {key_partition, pid_partition} = partitions(kind, key, self, partitions)
+    key_ets = key_ets || key_ets!(registry, key_partition)
+    {pid_server, pid_ets} = pid_ets || pid_ets!(registry, pid_partition)
 
     # Notice we write first to the pid ets table because it will
     # always be able to do the clean up. If we register first to the
@@ -670,12 +650,36 @@ defmodule Registry do
     :ets.lookup_element(registry, @listeners, 2)
   end
 
+  defp key_ets!(registry, key, partitions) do
+    :ets.lookup_element(registry, :erlang.phash2(key, partitions), 2)
+  end
+
   defp key_ets!(registry, partition) do
     :ets.lookup_element(registry, partition, 2)
   end
 
+  defp pid_ets!(registry, key, partitions) do
+    :ets.lookup_element(registry, :erlang.phash2(key, partitions), 3)
+  end
+
   defp pid_ets!(registry, partition) do
     :ets.lookup_element(registry, partition, 3)
+  end
+
+  defp safe_lookup_second(ets, key) do
+    try do
+      :ets.lookup_element(ets, key, 2)
+    catch
+      :error, :badarg -> []
+    end
+  end
+
+  defp partitions(:unique, key, pid, partitions) do
+    {:erlang.phash2(key, partitions), :erlang.phash2(pid, partitions)}
+  end
+  defp partitions(:duplicate, _key, pid, partitions) do
+    partition = :erlang.phash2(pid, partitions)
+    {partition, partition}
   end
 
   defp unlink_if_unregistered(pid_server, pid_ets, self) do
@@ -702,7 +706,7 @@ defmodule Registry.Supervisor do
       for i <- 0..partitions-1 do
         key_partition = Registry.Partition.key_name(registry, i)
         pid_partition = Registry.Partition.pid_name(registry, i)
-        arg = {kind, registry, i, key_partition, pid_partition}
+        arg = {kind, registry, i, key_partition, pid_partition, partitions}
         worker(Registry.Partition, [pid_partition, arg], id: pid_partition)
       end
 
@@ -727,6 +731,7 @@ defmodule Registry.Partition do
   # and is responsible for monitoring processes that map to
   # the its own pid table.
   use GenServer
+  @info -1
 
   @doc """
   Returns the name of key partition table.
@@ -745,40 +750,6 @@ defmodule Registry.Partition do
   end
 
   @doc """
-  Receives the kind, key, pid and number of partitions and
-  returns the value for the key partition.
-  """
-  @spec key_partition(Registry.kind, term, pid, non_neg_integer) :: non_neg_integer
-  def key_partition(:unique, key, _pid, partitions) do
-    :erlang.phash2(key, partitions)
-  end
-  def key_partition(:duplicate, _key, pid, partitions) do
-    :erlang.phash2(pid, partitions)
-  end
-
-  @doc """
-  Receives the pid and number of partitions and returns the
-  value for the pid partition.
-  """
-  @spec pid_partition(pid, non_neg_integer) :: non_neg_integer
-  def pid_partition(pid, partitions) do
-    :erlang.phash2(pid, partitions)
-  end
-
-  @doc """
-  Receives the kind, key, pid and number of partitions and
-  returns the value for both key and pid partitions.
-  """
-  @spec partitions(Registry.kind, term, pid, non_neg_integer) :: {non_neg_integer, non_neg_integer}
-  def partitions(:unique, key, pid, partitions) do
-    {:erlang.phash2(key, partitions), :erlang.phash2(pid, partitions)}
-  end
-  def partitions(:duplicate, _key, pid, partitions) do
-    partition = :erlang.phash2(pid, partitions)
-    {partition, partition}
-  end
-
-  @doc """
   Starts the registry partition.
 
   The process is only responsible for monitoring, demonitoring
@@ -790,11 +761,19 @@ defmodule Registry.Partition do
 
   ## Callbacks
 
-  def init({kind, registry, i, key_partition, pid_partition}) do
+  def init({kind, registry, i, key_partition, pid_partition, partitions}) do
     Process.flag(:trap_exit, true)
     key_ets = init_key_ets(kind, key_partition)
     pid_ets = init_pid_ets(kind, pid_partition)
-    true = :ets.insert(registry, {i, key_ets, {self(), pid_ets}})
+
+    # If we have only one partition, we do an optimization which
+    # is to write the table information alongside the registry info.
+    if partitions == 1 do
+      true = :ets.insert(registry, {@info, {kind, 1, key_ets, {self(), pid_ets}}})
+    else
+      true = :ets.insert(registry, {i, key_ets, {self(), pid_ets}})
+    end
+
     {:ok, pid_ets}
   end
 

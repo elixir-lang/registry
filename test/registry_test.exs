@@ -148,21 +148,6 @@ defmodule RegistryTest do
         refute pid in links
       end
 
-      test "cleans up tables on process crash", %{registry: registry, partitions: partitions} do
-        {_, task1} = register_task(registry, "hello", :value)
-        {_, task2} = register_task(registry, "world", :value)
-
-        kill_and_assert_down(task1)
-        kill_and_assert_down(task2)
-
-        for i <- 0..partitions-1 do
-          [{_, key, {partition, pid}}] = :ets.lookup(registry, i)
-          GenServer.call(partition, :sync)
-          assert :ets.tab2list(key) == []
-          assert :ets.tab2list(pid) == []
-        end
-      end
-
       test "raises on unknown registry name" do
         assert_raise ArgumentError, ~r/unknown registry/, fn ->
           Registry.register(:unknown, "hello", :value)
@@ -313,21 +298,6 @@ defmodule RegistryTest do
         refute pid in links
       end
 
-      test "cleans up tables on process crash", %{registry: registry, partitions: partitions} do
-        {_, task1} = register_task(registry, "hello", :value)
-        {_, task2} = register_task(registry, "world", :value)
-
-        kill_and_assert_down(task1)
-        kill_and_assert_down(task2)
-
-        for i <- 0..partitions-1 do
-          [{_, key, {partition, pid}}] = :ets.lookup(registry, i)
-          GenServer.call(partition, :sync)
-          assert :ets.tab2list(key) == []
-          assert :ets.tab2list(pid) == []
-        end
-      end
-
       test "raises on unknown registry name" do
         assert_raise ArgumentError, ~r/unknown registry/, fn ->
           Registry.register(:unknown, "hello", :value)
@@ -339,6 +309,43 @@ defmodule RegistryTest do
           name = {:via, Registry, {registry, "hello"}}
           Agent.start_link(fn -> 0 end, name: name)
         end
+      end
+    end
+  end
+
+  # Note: those tests relies on internals
+  for kind <- [:unique, :duplicate] do
+    describe "clean up #{kind} registry on process crash" do
+      @describetag kind: kind
+
+      @tag partitions: 8
+      test "with 8 partitions", %{registry: registry} do
+        {_, task1} = register_task(registry, "hello", :value)
+        {_, task2} = register_task(registry, "world", :value)
+
+        kill_and_assert_down(task1)
+        kill_and_assert_down(task2)
+
+        for i <- 0..7 do
+          [{_, key, {partition, pid}}] = :ets.lookup(registry, i)
+          GenServer.call(partition, :sync)
+          assert :ets.tab2list(key) == []
+          assert :ets.tab2list(pid) == []
+        end
+      end
+
+      @tag partitions: 1
+      test "with 1 partition", %{registry: registry} do
+        {_, task1} = register_task(registry, "hello", :value)
+        {_, task2} = register_task(registry, "world", :value)
+
+        kill_and_assert_down(task1)
+        kill_and_assert_down(task2)
+
+        [{-1, {_, _, key, {partition, pid}}}] = :ets.lookup(registry, -1)
+        GenServer.call(partition, :sync)
+        assert :ets.tab2list(key) == []
+        assert :ets.tab2list(pid) == []
       end
     end
   end
