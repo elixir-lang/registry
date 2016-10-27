@@ -65,9 +65,31 @@ defmodule Registry do
   value registered is a `{module, function}` tuple, allowing each entry to be
   invoked by the calling process.
 
-  Keep in mind dispatching happens in the process that calls `dispatch/3`,
-  registered processes are not involved in dispatching unless they are
-  explicitly sent messages to. That's the example we will see next.
+  Keep in mind dispatching happens in the process that calls `dispatch/3`.
+  The registered processes are not involved in dispatching unless such is
+  done explicitly. In the example, if there is a failure when dispatching,
+  due to a bad registration, dispatching will always fail. Let's fix that
+  by wrapping and reporting errors:
+
+      iex> require Logger
+      iex> {:ok, _} = Registry.start_link(:duplicate, Registry.DispatcherTest)
+      iex> {:ok, _} = Registry.register(Registry.DispatcherTest, "hello", {IO, :inspect})
+      iex> Registry.dispatch(Registry.DispatcherTest, "hello", fn entries ->
+      ...>   for {pid, {module, function}} <- entries do
+      ...>     try do
+      ...>       apply(module, function, [pid])
+      ...>     catch
+      ...>       kind, reason ->
+      ...>         formatted = Exception.format(kind, reason, System.stacktrace)
+      ...>         Logger.error "Registry.dispatch/3 failed with #{formatted}"
+      ...>     end
+      ...>   end
+      ...> end)
+      # Prints #PID<...>
+      :ok
+
+  You could also replace the whole `apply` system by  explicitly sending
+  messages. That's the example we will see next.
 
   ## Using as a PubSub
 
