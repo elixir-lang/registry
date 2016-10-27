@@ -127,6 +127,8 @@ defmodule Registry.Sojourn do
   end
 
   def handle_info({:subscribe, _, key, pid, _value}, %{pool_size: pool_size} = state) do
+    _ = Process.monitor(pid)
+
     case key do
       {_, id} when id in 0..pool_size-1 ->
         :ok
@@ -134,10 +136,17 @@ defmodule Registry.Sojourn do
         Logger.warn "Registry.Sojourn expects registry key to be {term, id} " <>
                     "where id is between 0..#{pool_size-1}, got: #{inspect key}"
     end
-    {:noreply, update_in(state.pids, &[{pid, key} | &1])}
+
+    state = update_in(state.pids, &[{pid, key} | &1])
+    {:noreply, state}
   end
   def handle_info({:unsubscribe, _, key, pid}, state) do
-    {:noreply, update_in(state.pids, &List.delete(&1, {pid, key}))}
+    state = update_in(state.pids, &List.delete(&1, {pid, key}))
+    {:noreply, state}
+  end
+  def handle_info({:DOWN, _, _, down_pid, _}, state) do
+    state = update_in state.pids, &for({pid, _} = pair <- &1, pid != down_pid, do: pair)
+    {:noreply, state}
   end
   def handle_info({:sample, interval}, %{pids: pids, name: name} = state) do
     time = System.system_time

@@ -5,7 +5,8 @@ defmodule RegistryTest do
   setup config do
     kind = config[:kind] || :unique
     partitions = config[:partitions] || 1
-    {:ok, _} = Registry.start_link(kind, config.test, partitions: partitions)
+    listeners = List.wrap(config[:listener])
+    {:ok, _} = Registry.start_link(kind, config.test, partitions: partitions, listeners: listeners)
     {:ok, %{registry: config.test, partitions: partitions}}
   end
 
@@ -113,6 +114,20 @@ defmodule RegistryTest do
 
       test "allows unregistering with no entries", %{registry: registry} do
         assert Registry.unregister(registry, "hello") == :ok
+      end
+
+      @tag listener: :"unique_listener_#{partitions}"
+      test "allows listeners", %{registry: registry, listener: listener} do
+        Process.register(self(), listener)
+        {_, task} = register_task(registry, "hello", :world)
+        assert_received {:register, ^registry, "hello", ^task, :world}
+
+        self = self()
+        {:ok, _} = Registry.register(registry, "world", :value)
+        assert_received {:register, ^registry, "world", ^self, :value}
+
+        :ok = Registry.unregister(registry, "world")
+        assert_received {:unregister, ^registry, "world", ^self}
       end
 
       test "links and unlinks on register/unregister", %{registry: registry} do
@@ -264,6 +279,20 @@ defmodule RegistryTest do
 
       test "allows unregistering with no entries", %{registry: registry} do
         assert Registry.unregister(registry, "hello") == :ok
+      end
+
+      @tag listener: :"duplicate_listener_#{partitions}"
+      test "allows listeners", %{registry: registry, listener: listener} do
+        Process.register(self(), listener)
+        {_, task} = register_task(registry, "hello", :world)
+        assert_received {:register, ^registry, "hello", ^task, :world}
+
+        self = self()
+        {:ok, _} = Registry.register(registry, "hello", :value)
+        assert_received {:register, ^registry, "hello", ^self, :value}
+
+        :ok = Registry.unregister(registry, "hello")
+        assert_received {:unregister, ^registry, "hello", ^self}
       end
 
       test "links and unlinks on register/unregister", %{registry: registry} do
