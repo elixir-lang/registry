@@ -3,17 +3,6 @@
 
 Code.require_file "shared.exs", __DIR__
 
-defmodule ErlangRegistry do
-  def whereis_name(name) do
-    :erlang.whereis(name)
-  end
-
-  def register_name(name, pid) when pid == self() do
-    :erlang.register(name, pid)
-    :yes
-  end
-end
-
 tasks = String.to_integer System.get_env("TASKS") || "1"
 IO.puts "erlang: registering #{tasks} x 10000 entries"
 
