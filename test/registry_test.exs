@@ -32,6 +32,15 @@ defmodule RegistryTest do
         assert Registry.keys(registry, self()) |> Enum.sort() == ["hello", "world"]
       end
 
+      test "has unique registrations across processes", %{registry: registry} do
+        {_, task} = register_task(registry, "hello", :value)
+
+        assert {:error, {:already_registered, ^task}} =
+               Registry.register(registry, "hello", :recent)
+        assert Registry.keys(registry, self()) == []
+        assert Process.info(self(), :links) == {:links, [Process.whereis(registry)]}
+      end
+
       test "has unique registrations even if partition is delayed", %{registry: registry} do
         {owner, task} = register_task(registry, "hello", :value)
         assert Registry.register(registry, "hello", :other) ==

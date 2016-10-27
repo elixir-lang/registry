@@ -504,10 +504,7 @@ defmodule Registry do
     true = :ets.match_delete(key_ets, {key, {self, :_}})
     true = :ets.delete_object(pid_ets, {self, key, key_ets})
 
-    case :ets.select_count(pid_ets, [{{self, :_, :_}, [], [true]}]) do
-      0 -> Process.unlink(pid_server)
-      _ -> :ok
-    end
+    unlink_if_unregistered(pid_server, pid_ets, self)
 
     for listener <- listeners!(registry) do
       Kernel.send(listener, {:unregister, registry, key, self})
@@ -574,7 +571,11 @@ defmodule Registry do
           Kernel.send(listener, {:register, registry, key, self, value})
         end
         ok
+      {:error, {:already_registered, ^self}} = error ->
+        error
       {:error, _} = error ->
+        true = :ets.delete_object(pid_ets, {self, key, key_ets})
+        unlink_if_unregistered(pid_server, pid_ets, self)
         error
     end
   end
@@ -675,6 +676,13 @@ defmodule Registry do
 
   defp pid_ets!(registry, partition) do
     :ets.lookup_element(registry, partition, 3)
+  end
+
+  defp unlink_if_unregistered(pid_server, pid_ets, self) do
+    case :ets.select_count(pid_ets, [{{self, :_, :_}, [], [true]}]) do
+      0 -> Process.unlink(pid_server)
+      _ -> :ok
+    end
   end
 end
 
