@@ -78,7 +78,7 @@ defmodule Registry.Sojourn do
     receive_time = System.system_time
 
     update =
-      Registry.update(name, key, fn _ ->
+      Registry.update_value(name, key, fn _ ->
         {-send_time, receive_time - send_time}
       end)
 

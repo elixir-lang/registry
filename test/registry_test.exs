@@ -54,13 +54,13 @@ defmodule RegistryTest do
       end
 
       test "updates current process value", %{registry: registry} do
-        assert Registry.update(registry, "hello", &raise/1) == :error
+        assert Registry.update_value(registry, "hello", &raise/1) == :error
         register_task(registry, "hello", :value)
-        assert Registry.update(registry, "hello", &raise/1) == :error
+        assert Registry.update_value(registry, "hello", &raise/1) == :error
 
         Registry.register(registry, "world", 1)
         assert Registry.lookup(registry, "world") == [{self(), 1}]
-        assert Registry.update(registry, "world", & &1 + 1) == {2, 1}
+        assert Registry.update_value(registry, "world", & &1 + 1) == {2, 1}
         assert Registry.lookup(registry, "world") == [{self(), 2}]
       end
 

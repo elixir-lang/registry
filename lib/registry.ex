@@ -259,14 +259,14 @@ defmodule Registry do
       iex> {:ok, _} = Registry.register(Registry.UpdateTest, "hello", 1)
       iex> Registry.lookup(Registry.UpdateTest, "hello")
       [{self(), 1}]
-      iex> Registry.update(Registry.UpdateTest, "hello", & &1 + 1)
+      iex> Registry.update_value(Registry.UpdateTest, "hello", & &1 + 1)
       {2, 1}
       iex> Registry.lookup(Registry.UpdateTest, "hello")
       [{self(), 2}]
 
   """
-  @spec update(registry, key, (value -> value)) :: {new_value :: term, old_value :: term} | :error
-  def update(registry, key, callback) when is_atom(registry) and is_function(callback, 1) do
+  @spec update_value(registry, key, (value -> value)) :: {new_value :: term, old_value :: term} | :error
+  def update_value(registry, key, callback) when is_atom(registry) and is_function(callback, 1) do
     case info!(registry) do
       {:unique, partitions, key_ets, _} ->
         key_ets = key_ets || key_ets!(registry, key, partitions)
@@ -283,7 +283,7 @@ defmodule Registry do
             :error
         end
       {kind, _, _, _} ->
-        raise ArgumentError, "Registry.update/3 is not supported for #{kind} registries"
+        raise ArgumentError, "Registry.update_value/3 is not supported for #{kind} registries"
     end
   end
 
