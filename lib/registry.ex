@@ -9,7 +9,8 @@ defmodule Registry do
 
   Each entry in the registry is associated to the process that has
   registered the key. If the process crashes, the keys associated to that
-  process are automatically removed.
+  process are automatically removed. All key operations on the registry
+  are done using the match operation (`===`).
 
   The registry can be used for name lookups, using the `:via` option,
   for storing properties, for custom dispatching rules as well as a
@@ -142,10 +143,23 @@ defmodule Registry do
   @info -1
   @listeners -2
 
+  @typedoc "The registry identifier"
   @type registry :: atom
+
+  @typedoc "The type of the registry"
   @type kind :: :unique | :duplicate
+
+  @typedoc "The type of keys allowed on registration"
   @type key :: term
+
+  @typedoc "The type of values allowed on registration"
   @type value :: term
+
+  @typedoc "The type of registry metadata keys"
+  @type meta_key :: atom | tuple
+
+  @typedoc "The type of registry metadata values"
+  @type meta_value :: term
 
   ## Via callbacks
 
@@ -223,7 +237,8 @@ defmodule Registry do
     * `:meta` - a keyword list of metadata to be attached to the registry.
 
   """
-  @spec start_link(kind, registry, Keyword.t) :: {:ok, pid} | {:error, term}
+  @spec start_link(kind, registry, options) :: {:ok, pid} | {:error, term}
+        when options: [partitions: pos_integer, listeners: [atom], meta: [{meta_key, meta_value}]]
   def start_link(kind, registry, options \\ []) when kind in @kind and is_atom(registry) do
     meta = Keyword.get(options, :meta, [])
     unless Keyword.keyword?(meta) do
@@ -610,17 +625,19 @@ defmodule Registry do
   @doc """
   Reads registry metadata given on `start_link/3`.
 
+  Atoms and tuples are allowed as keys.
+
   ## Examples
 
-      iex> Registry.start_link(:unique, Registry.InfoDocTest, meta: [custom_key: "custom_value"])
-      iex> Registry.meta(Registry.InfoDocTest, :custom_key)
+      iex> Registry.start_link(:unique, Registry.MetaTest, meta: [custom_key: "custom_value"])
+      iex> Registry.meta(Registry.MetaTest, :custom_key)
       {:ok, "custom_value"}
-      iex> Registry.meta(Registry.InfoDocTest, :unknown_key)
+      iex> Registry.meta(Registry.MetaTest, :unknown_key)
       :error
 
   """
-  @spec meta(registry, meta_key :: atom) :: {:ok, meta_value :: term} | :error
-  def meta(registry, key) when is_atom(registry) and is_atom(key) do
+  @spec meta(registry, meta_key) :: {:ok, meta_value} | :error
+  def meta(registry, key) when is_atom(registry) and (is_atom(key) or is_tuple(key)) do
     try do
       :ets.lookup(registry, key)
     catch
@@ -635,20 +652,23 @@ defmodule Registry do
   @doc """
   Stores registry metadata.
 
-  It is not possible to update the values for registry own's metadata,
-  such as `:partitions` and `:listeners`.
+  Atoms and tuples are allowed as keys.
 
   ## Examples
 
-      iex> Registry.start_link(:unique, Registry.InfoDocTest)
-      iex> Registry.put_meta(Registry.InfoDocTest, :custom_key, "custom_value")
+      iex> Registry.start_link(:unique, Registry.PutMetaTest)
+      iex> Registry.put_meta(Registry.PutMetaTest, :custom_key, "custom_value")
       :ok
-      iex> Registry.meta(Registry.InfoDocTest, :custom_key)
+      iex> Registry.meta(Registry.PutMetaTest, :custom_key)
       {:ok, "custom_value"}
+      iex> Registry.put_meta(Registry.PutMetaTest, {:tuple, :key}, "tuple_value")
+      :ok
+      iex> Registry.meta(Registry.PutMetaTest, {:tuple, :key})
+      {:ok, "tuple_value"}
 
   """
-  @spec put_meta(registry, meta_key :: atom, meta_value :: term) :: :ok
-  def put_meta(registry, key, value) when is_atom(registry) and is_atom(key) do
+  @spec put_meta(registry, meta_key, meta_value) :: :ok
+  def put_meta(registry, key, value) when is_atom(registry) and (is_atom(key) or is_tuple(key)) do
     try do
       :ets.insert(registry, {key, value})
       :ok
@@ -659,6 +679,12 @@ defmodule Registry do
   end
 
   ## Helpers
+
+  @compile {:inline, hash: 2}
+
+  defp hash(term, limit) do
+    :erlang.phash2(term, limit)
+  end
 
   defp info!(registry) do
     try do
@@ -674,7 +700,7 @@ defmodule Registry do
   end
 
   defp key_ets!(registry, key, partitions) do
-    :ets.lookup_element(registry, :erlang.phash2(key, partitions), 2)
+    :ets.lookup_element(registry, hash(key, partitions), 2)
   end
 
   defp key_ets!(registry, partition) do
@@ -682,7 +708,7 @@ defmodule Registry do
   end
 
   defp pid_ets!(registry, key, partitions) do
-    :ets.lookup_element(registry, :erlang.phash2(key, partitions), 3)
+    :ets.lookup_element(registry, hash(key, partitions), 3)
   end
 
   defp pid_ets!(registry, partition) do
@@ -698,10 +724,10 @@ defmodule Registry do
   end
 
   defp partitions(:unique, key, pid, partitions) do
-    {:erlang.phash2(key, partitions), :erlang.phash2(pid, partitions)}
+    {hash(key, partitions), hash(pid, partitions)}
   end
   defp partitions(:duplicate, _key, pid, partitions) do
-    partition = :erlang.phash2(pid, partitions)
+    partition = hash(pid, partitions)
     {partition, partition}
   end
 

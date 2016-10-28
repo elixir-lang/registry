@@ -53,6 +53,12 @@ defmodule RegistryTest do
         assert Registry.lookup(registry, "hello") == [{self(), :other}]
       end
 
+      test "compares using matches", %{registry: registry} do
+        {:ok, _} = Registry.register(registry, 1.0, :value)
+        {:ok, _} = Registry.register(registry, 1, :value)
+        assert Registry.keys(registry, self()) |> Enum.sort() == [1, 1.0]
+      end
+
       test "updates current process value", %{registry: registry} do
         assert Registry.update_value(registry, "hello", &raise/1) == :error
         register_task(registry, "hello", :value)
@@ -197,6 +203,12 @@ defmodule RegistryTest do
         {:ok, pid} = Registry.register(registry, "world", :value)
         assert is_pid(pid)
         assert Registry.keys(registry, self()) |> Enum.sort() == ["hello", "hello", "world"]
+      end
+
+      test "compares using matches", %{registry: registry} do
+        {:ok, _} = Registry.register(registry, 1.0, :value)
+        {:ok, _} = Registry.register(registry, 1, :value)
+        assert Registry.keys(registry, self()) |> Enum.sort() == [1, 1.0]
       end
 
       test "looks up process considering liveness", %{registry: registry} do
