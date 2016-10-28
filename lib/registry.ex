@@ -4,8 +4,9 @@ defmodule Registry do
 
   It allows developers to lookup one or more processes with a given key.
   If the registry has `:unique` keys, a key points to 0 or 1 processes.
-  If the registry allows `:duplicate` keys, a single key may point to any number of processes.,
-  In both cases, different keys could identify the same process.
+  If the registry allows `:duplicate` keys, a single key may point to any
+  number of processes. In both cases, different keys could identify the
+  same process.
 
   Each entry in the registry is associated to the process that has
   registered the key. If the process crashes, the keys associated to that
@@ -39,14 +40,15 @@ defmodule Registry do
 
       supervisor(Registry, [:unique, Registry.ViaTest])
 
-  Only registries with `:unique` keys can be used in `:via`. If the name is
+  Only registries with unique keys can be used in `:via`. If the name is
   already taken, the case-specific `start_link` function (`Agent.start_link/2`
   in the example above) will return `{:error, {:already_started, current_pid}}`.
 
   ## Using as a dispatcher
 
-  `Registry` has a dispatch mechanism that allows developers to implement
-  custom dispatch logic triggered from the caller. For example, let's say we have a `:duplicate` registry started as so:
+  `Registry` has a dispatch mechanism that allows developers to implement custom
+  dispatch logic triggered from the caller. For example, let's say we have a
+  duplicate registry started as so:
 
       {:ok, _} = Registry.start_link(:duplicate, Registry.DispatcherTest)
 
@@ -57,7 +59,12 @@ defmodule Registry do
 
       {:ok, _} = Registry.register(Registry.DispatcherTest, "hello", {IO, :inspect})
 
-  Now, an entity interested in dispatching events for a given key may call `dispatch/3` passing in the key and a callback. This callback will be invoked with a list of all the values registered under the requested key, alongside the pid of the process that registered each value, in the form of `{pid, value}` tuples. In our example, `value` will be the `{module, function}` tuple in the code above:
+  Now, an entity interested in dispatching events for a given key may call
+  `dispatch/3` passing in the key and a callback. This callback will be invoked
+  with a list of all the values registered under the requested key, alongside
+  the pid of the process that registered each value, in the form of `{pid,
+  value}` tuples. In our example, `value` will be the `{module, function}` tuple
+  in the code above:
 
       iex> Registry.dispatch(Registry.DispatcherTest, "hello", fn entries ->
       ...>   for {pid, {module, function}} <- entries, do: apply(module, function, [pid])
