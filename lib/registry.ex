@@ -263,7 +263,7 @@ defmodule Registry do
   @doc """
   Updates the value for `key` for the current process in the unique `registry`.
 
-  Returns the `{old_value, new_value}` or `:error` if there
+  Returns a `{new_value, old_value}` tuple or `:error` if there
   is no such key assigned to the current process.
 
   If a non-unique registry is given, an error is raised.
