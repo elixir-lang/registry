@@ -2,19 +2,20 @@ defmodule Registry do
   @moduledoc ~S"""
   A local, decentralized and scalable key-value process storage.
 
-  It allows developers to lookup one or more process with a given key.
+  It allows developers to lookup one or more processes with a given key.
   If the registry has `:unique` keys, a key points to 0 or 1 processes.
-  If the registry allows `:duplicate` keys, a single key may point to 0,
-  1 or many processes. In both cases, a process may have multiple keys.
+  If the registry allows `:duplicate` keys, a single key may point to any
+  number of processes. In both cases, different keys could identify the
+  same process.
 
   Each entry in the registry is associated to the process that has
   registered the key. If the process crashes, the keys associated to that
-  process are automatically removed. All key operations on the registry
+  process are automatically removed. All key comparisons in the registry
   are done using the match operation (`===`).
 
-  The registry can be used for name lookups, using the `:via` option,
-  for storing properties, for custom dispatching rules as well as a
-  pubsub implementation. We explore those scenarios below.
+  The registry can be used for different purposes, such as name lookups (using
+  the `:via` option), storing properties, custom dispatching rules, or a pubsub
+  implementation. We explore some of those use cases below.
 
   The registry may also be transparently partitioned, which provides
   more scalable behaviour for running registries on highly concurrent
@@ -22,81 +23,84 @@ defmodule Registry do
 
   ## Using in `:via`
 
-  Once the registry is started with a given name, it can be used to
-  register and access named processes using the
-  `{:via, Registry, {registry, key}}` tuple:
+  Once the registry is started with a given name (using
+  `Registry.start_link/2`), it can be used to register and access named
+  processes using the `{:via, Registry, {registry, key}}` tuple:
 
-      iex> {:ok, _} = Registry.start_link(:unique, Registry.ViaTest)
-      iex> name = {:via, Registry, {Registry.ViaTest, "agent"}}
-      iex> {:ok, _} = Agent.start_link(fn -> 0 end, name: name)
-      iex> Agent.get(name, & &1)
-      0
-      iex> Agent.update(name, & &1 + 1)
-      iex> Agent.get(name, & &1)
-      1
+      {:ok, _} = Registry.start_link(:unique, Registry.ViaTest)
+      name = {:via, Registry, {Registry.ViaTest, "agent"}}
+      {:ok, _} = Agent.start_link(fn -> 0 end, name: name)
+      Agent.get(name, & &1)
+      #=> 0
+      Agent.update(name, & &1 + 1)
+      Agent.get(name, & &1)
+      #=> 1
 
   Typically the registry is started as part of a supervision tree though:
 
       supervisor(Registry, [:unique, Registry.ViaTest])
 
-  Only registry with unique keys can be used in `:via`. If the name is
-  already taken, the `start_link` function, such as `Agent.start_link/2`
-  above, will return `{:error, {:already_started, current_pid}}`.
+  Only registries with unique keys can be used in `:via`. If the name is
+  already taken, the case-specific `start_link` function (`Agent.start_link/2`
+  in the example above) will return `{:error, {:already_started, current_pid}}`.
 
   ## Using as a dispatcher
 
-  `Registry` has a dispatch mechanism that allows developers to implement
-  custom dispatch logic triggered from the caller. For example:
+  `Registry` has a dispatch mechanism that allows developers to implement custom
+  dispatch logic triggered from the caller. For example, let's say we have a
+  duplicate registry started as so:
 
-      iex> {:ok, _} = Registry.start_link(:duplicate, Registry.DispatcherTest)
-      iex> {:ok, _} = Registry.register(Registry.DispatcherTest, "hello", {IO, :inspect})
-      iex> Registry.dispatch(Registry.DispatcherTest, "hello", fn entries ->
-      ...>   for {pid, {module, function}} <- entries, do: apply(module, function, [pid])
-      ...> end)
+      {:ok, _} = Registry.start_link(:duplicate, Registry.DispatcherTest)
+
+  By calling `register/3`, different processes can register under a given key
+  and associate any value udner that key. In this case, let's register the
+  current process under the key `"hello"` and attach the `{IO, :inspect}` tuple
+  to it:
+
+      {:ok, _} = Registry.register(Registry.DispatcherTest, "hello", {IO, :inspect})
+
+  Now, an entity interested in dispatching events for a given key may call
+  `dispatch/3` passing in the key and a callback. This callback will be invoked
+  with a list of all the values registered under the requested key, alongside
+  the pid of the process that registered each value, in the form of `{pid,
+  value}` tuples. In our example, `value` will be the `{module, function}` tuple
+  in the code above:
+
+      Registry.dispatch(Registry.DispatcherTest, "hello", fn entries ->
+        for {pid, {module, function}} <- entries, do: apply(module, function, [pid])
+      end
+      # Prints #PID<...> where the pid is for the process that called register/3 above
+      #=> :ok
+
+  Keep in mind dispatching happens in the process that calls `dispatch/3`, so
+  the callback is executed there.  The registered processes are not involved in
+  dispatching unless such is done explicitly. In the example, if there is a
+  failure when dispatching, due to a bad registration, dispatching will always
+  fail. Let's fix that by wrapping and reporting errors:
+
+      require Logger
+      Registry.dispatch(Registry.DispatcherTest, "hello", fn entries ->
+        for {pid, {module, function}} <- entries do
+          try do
+            apply(module, function, [pid])
+          catch
+            kind, reason ->
+              formatted = Exception.format(kind, reason, System.stacktrace)
+              Logger.error "Registry.dispatch/3 failed with #{formatted}"
+          end
+        end
+      end)
       # Prints #PID<...>
-      :ok
+      #=> :ok
 
-  By calling `register/3` different processes can register under a given key
-  and associate any value under that key. In the case of the example above a
-  process registers a specific `{module, function}` tuple under the key
-  `"hello"`.  Later on, an entity interested in dispatching events, may call
-  `dispatch/3`, which will receive a list of all the values registered with the
-  requested key, as well as the pid of the process that registered that value,
-  in the form of a tuple matching `{pid, value}`.  In the example above the
-  value registered is a `{module, function}` tuple, allowing each entry to be
-  invoked by the calling process.
-
-  Keep in mind dispatching happens in the process that calls `dispatch/3`.
-  The registered processes are not involved in dispatching unless such is
-  done explicitly. In the example, if there is a failure when dispatching,
-  due to a bad registration, dispatching will always fail. Let's fix that
-  by wrapping and reporting errors:
-
-      iex> require Logger
-      iex> {:ok, _} = Registry.start_link(:duplicate, Registry.DispatcherTest)
-      iex> {:ok, _} = Registry.register(Registry.DispatcherTest, "hello", {IO, :inspect})
-      iex> Registry.dispatch(Registry.DispatcherTest, "hello", fn entries ->
-      ...>   for {pid, {module, function}} <- entries do
-      ...>     try do
-      ...>       apply(module, function, [pid])
-      ...>     catch
-      ...>       kind, reason ->
-      ...>         formatted = Exception.format(kind, reason, System.stacktrace)
-      ...>         Logger.error "Registry.dispatch/3 failed with #{formatted}"
-      ...>     end
-      ...>   end
-      ...> end)
-      # Prints #PID<...>
-      :ok
-
-  You could also replace the whole `apply` system by  explicitly sending
+  You could also replace the whole `apply` system by explicitly sending
   messages. That's the example we will see next.
 
   ## Using as a PubSub
 
-  Registries can also be used to implement a local, non-distributed,
-  scalable PubSub by relying on the `dispatch/3` function, similar to
-  the previous section, except we will send messages to each associated
+  Registries can also be used to implement a local, non-distributed, scalable
+  PubSub by relying on the `dispatch/3` function, similarly to the previous
+  section: in this case, however, we will send messages to each associated
   process, instead of invoking a given module-function.
 
   In this example, we will also set the number of partitions to the number of
@@ -104,16 +108,17 @@ defmodule Registry do
   concurrent environments as each partition will spawn a new process, allowing
   dispatching to happen in parallel:
 
-      iex> {:ok, _} = Registry.start_link(:duplicate, Registry.PubSubTest,
-      ...>                                partitions: System.schedulers_online)
-      iex> {:ok, _} = Registry.register(Registry.PubSubTest, "hello", [])
-      iex> Registry.dispatch(Registry.PubSubTest, "hello", fn entries ->
-      ...>   for {pid, _} <- entries, do: send(pid, {:broadcast, "world"})
-      ...> end)
-      :ok
+      {:ok, _} = Registry.start_link(:duplicate, Registry.PubSubTest,
+                                     partitions: System.schedulers_online)
+      {:ok, _} = Registry.register(Registry.PubSubTest, "hello", [])
+      Registry.dispatch(Registry.PubSubTest, "hello", fn entries ->
+        for {pid, _} <- entries, do: send(pid, {:broadcast, "world"})
+      end)
+      #=> :ok
 
   The example above broadcasted the message `{:broadcast, "world"}` to all
-  processes registered under the topic "hello".
+  processes registered under the "topic" (or "key" as we called it until now)
+  `"hello"`.
 
   The third argument given to `register/3` is a value associated to the
   current process. While in the previous section we used it when dispatching,
@@ -126,15 +131,19 @@ defmodule Registry do
   the cost of delayed unsubscription. For example, if a process crashes,
   its keys are automatically removed from the registry but the change may
   not propagate immediately. This means certain operations may return process
-  that are already dead. When such may happen, it will be explicitly written
+  that are already dead. When such may happen, it will be explicitly stated
   in the function documentation.
 
   However, keep in mind those cases are typically not an issue. After all, a
   process referenced by a pid may crash at any time, including between getting
   the value from the registry and sending it a message. Many parts of the standard
   library are designed to cope with that, such as `Process.monitor/1` which will
-  deliver the DOWN message immediately if the monitored process is already dead
+  deliver the `:DOWN` message immediately if the monitored process is already dead
   and `Kernel.send/2` which acts as a no-op for dead processes.
+
+  ## ETS
+
+  Note that the registry uses one ETS table plus two ETS tables per partition.
   """
 
   # TODO: Decide if it should be started as part of Elixir's supervision tree.
@@ -213,9 +222,9 @@ defmodule Registry do
 
       supervisor(Registry, [:unique, MyApp.Registry])
 
-  For intensive workloads, the registry may also be partitioned. If
-  partioning is required a good default is to set the number of
-  partitions to the number of schedulers available:
+  For intensive workloads, the registry may also be partitioned (by specifying
+  the `:partitions` option). If partioning is required then a good default is to
+  set the number of partitions to the number of schedulers available:
 
       Registry.start_link(:unique, MyApp.Registry, partitions: System.schedulers_online())
 
@@ -223,17 +232,15 @@ defmodule Registry do
 
       supervisor(Registry, [:unique, MyApp.Registry, [partitions: System.schedulers_online()]])
 
-  The registry uses one ETS table for metadata plus 2 ETS tables
-  per partition.
-
   ## Options
 
   The registry supports the following options:
 
-    * `:partitions` - the number of partitions in the registry. Defaults to 1.
+    * `:partitions` - the number of partitions in the registry. Defaults to `1`.
     * `:listeners` - a list of named processes which are notified of `:register`
       and `:unregister` events. The registered process must be monitored by the
-      listener if it wants to be notified of crashes.
+      listener if the listener wants to be notified if the registered process
+      crashes.
     * `:meta` - a keyword list of metadata to be attached to the registry.
 
   """
@@ -447,7 +454,7 @@ defmodule Registry do
       iex> Registry.keys(Registry.UniqueKeysTest, self())
       []
       iex> {:ok, _} = Registry.register(Registry.UniqueKeysTest, "hello", :world)
-      iex> Registry.register(Registry.UniqueKeysTest, "hello", :later)
+      iex> Registry.register(Registry.UniqueKeysTest, "hello", :later) # registry is :unique
       {:error, {:already_registered, self()}}
       iex> Registry.keys(Registry.UniqueKeysTest, self())
       ["hello"]
@@ -481,7 +488,8 @@ defmodule Registry do
   process in `registry`.
 
   Always returns `:ok` and automatically unlinks the current process from
-  the owner if there are no more keys associated to the current process.
+  the owner if there are no more keys associated to the current process. See
+  also `register/3` to read more about the "owner".
 
   ## Examples
 
@@ -540,7 +548,7 @@ defmodule Registry do
   lookup.
 
   This function returns `{:ok, owner}` or `{:error, reason}`.
-  The `owner` is the pid of the registry partition responsible for
+  The `owner` is the pid is the registry partition responsible for
   the pid. The owner is automatically linked to the caller.
 
   If the registry has unique keys, it will return `{:ok, owner}` unless
