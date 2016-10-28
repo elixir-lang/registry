@@ -27,14 +27,14 @@ defmodule Registry do
   `Registry.start_link/2`), it can be used to register and access named
   processes using the `{:via, Registry, {registry, key}}` tuple:
 
-      iex> {:ok, _} = Registry.start_link(:unique, Registry.ViaTest)
-      iex> name = {:via, Registry, {Registry.ViaTest, "agent"}}
-      iex> {:ok, _} = Agent.start_link(fn -> 0 end, name: name)
-      iex> Agent.get(name, & &1)
-      0
-      iex> Agent.update(name, & &1 + 1)
-      iex> Agent.get(name, & &1)
-      1
+      {:ok, _} = Registry.start_link(:unique, Registry.ViaTest)
+      name = {:via, Registry, {Registry.ViaTest, "agent"}}
+      {:ok, _} = Agent.start_link(fn -> 0 end, name: name)
+      Agent.get(name, & &1)
+      #=> 0
+      Agent.update(name, & &1 + 1)
+      Agent.get(name, & &1)
+      #=> 1
 
   Typically the registry is started as part of a supervision tree though:
 
@@ -66,11 +66,11 @@ defmodule Registry do
   value}` tuples. In our example, `value` will be the `{module, function}` tuple
   in the code above:
 
-      iex> Registry.dispatch(Registry.DispatcherTest, "hello", fn entries ->
-      ...>   for {pid, {module, function}} <- entries, do: apply(module, function, [pid])
-      ...> end
+      Registry.dispatch(Registry.DispatcherTest, "hello", fn entries ->
+        for {pid, {module, function}} <- entries, do: apply(module, function, [pid])
+      end
       # Prints #PID<...> where the pid is for the process that called register/3 above
-      :ok
+      #=> :ok
 
   Keep in mind dispatching happens in the process that calls `dispatch/3`, so
   the callback is executed there.  The registered processes are not involved in
@@ -78,20 +78,20 @@ defmodule Registry do
   failure when dispatching, due to a bad registration, dispatching will always
   fail. Let's fix that by wrapping and reporting errors:
 
-      iex> require Logger
-      iex> Registry.dispatch(Registry.DispatcherTest, "hello", fn entries ->
-      ...>   for {pid, {module, function}} <- entries do
-      ...>     try do
-      ...>       apply(module, function, [pid])
-      ...>     catch
-      ...>       kind, reason ->
-      ...>         formatted = Exception.format(kind, reason, System.stacktrace)
-      ...>         Logger.error "Registry.dispatch/3 failed with #{formatted}"
-      ...>     end
-      ...>   end
-      ...> end)
+      require Logger
+      Registry.dispatch(Registry.DispatcherTest, "hello", fn entries ->
+        for {pid, {module, function}} <- entries do
+          try do
+            apply(module, function, [pid])
+          catch
+            kind, reason ->
+              formatted = Exception.format(kind, reason, System.stacktrace)
+              Logger.error "Registry.dispatch/3 failed with #{formatted}"
+          end
+        end
+      end)
       # Prints #PID<...>
-      :ok
+      #=> :ok
 
   You could also replace the whole `apply` system by explicitly sending
   messages. That's the example we will see next.
@@ -108,13 +108,13 @@ defmodule Registry do
   concurrent environments as each partition will spawn a new process, allowing
   dispatching to happen in parallel:
 
-      iex> {:ok, _} = Registry.start_link(:duplicate, Registry.PubSubTest,
-      ...>                                partitions: System.schedulers_online)
-      iex> {:ok, _} = Registry.register(Registry.PubSubTest, "hello", [])
-      iex> Registry.dispatch(Registry.PubSubTest, "hello", fn entries ->
-      ...>   for {pid, _} <- entries, do: send(pid, {:broadcast, "world"})
-      ...> end)
-      :ok
+      {:ok, _} = Registry.start_link(:duplicate, Registry.PubSubTest,
+                                     partitions: System.schedulers_online)
+      {:ok, _} = Registry.register(Registry.PubSubTest, "hello", [])
+      Registry.dispatch(Registry.PubSubTest, "hello", fn entries ->
+        for {pid, _} <- entries, do: send(pid, {:broadcast, "world"})
+      end)
+      #=> :ok
 
   The example above broadcasted the message `{:broadcast, "world"}` to all
   processes registered under the "topic" (or "key" as we called it until now)
