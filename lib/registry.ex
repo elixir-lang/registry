@@ -73,10 +73,9 @@ defmodule Registry do
       #=> :ok
 
   Keep in mind that if the registry is not partitioned then dispatching happens
-  in the process that calls `dispatch/3`, so the callback is executed there;
-  read the documentation for `dispatch/3` for more information on what happens
-  with partitioned registries. The registered processes are not involved in
-  dispatching unless such is done explicitly. In the example, if there is a
+  in the process that calls `dispatch/3`, so the callback is executed there (and
+  not in the registered process). The registered processes are not involved
+  in dispatching unless such is done explicitly. In the example, if there is a
   failure when dispatching, due to a bad registration, dispatching will always
   fail. Let's fix that by wrapping and reporting errors:
 
@@ -322,8 +321,10 @@ defmodule Registry do
 
   If the registry is not partitioned, the callback is invoked in the process
   that calls `dispatch/3`. If the registry is partitioned, the callback is
-  invoked for every partition that has matching entries **concurrently** (and
-  will run in each partition).
+  invoked for every partition that has matching entries and is executed
+  **concurrently** in each partition's process (not in the caller to
+  `dispatch/3`); each partition will run the callback passing the entries
+  present in that partition.
 
   Keep in mind the `dispatch/3` function may return entries that have died
   but have not yet been removed from the table. If this can be an issue,
