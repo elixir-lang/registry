@@ -72,11 +72,15 @@ defmodule Registry do
       # Prints #PID<...> where the pid is for the process that called register/3 above
       #=> :ok
 
-  Keep in mind dispatching happens in the process that calls `dispatch/3`, so
-  the callback is executed there.  The registered processes are not involved in
-  dispatching unless such is done explicitly. In the example, if there is a
-  failure when dispatching, due to a bad registration, dispatching will always
-  fail. Let's fix that by wrapping and reporting errors:
+  Dispatching happens in the process that calls `dispatch/3` either serially or
+  concurrently in case of multiple partitions (via spawned tasks). The
+  registered processes are not involved in dispatching unless involving them is
+  done explicitly (for example, by sending them a message in the callback).
+
+  Furthermore, if there is a failure when dispatching, due to a bad
+  registration, dispatching will always fail and the registered process will not
+  be notified. Therefore let's make sure we at least wrap and report those
+  errors:
 
       require Logger
       Registry.dispatch(Registry.DispatcherTest, "hello", fn entries ->
@@ -318,8 +322,11 @@ defmodule Registry do
   associated to the pid. If there are no entries for the given key,
   the callback is never invoked.
 
-  If the registry is partitioned, the callback will be invoked for
-  every partition that has matching entries **concurrently**.
+  If the registry is not partitioned, the callback is invoked in the process
+  that calls `dispatch/3`. If the registry is partitioned, the callback is
+  invoked concurrently per partition by starting a task linked to the
+  caller. The callback, however, is only invoked if there are entries for that
+  partition.
 
   Keep in mind the `dispatch/3` function may return entries that have died
   but have not yet been removed from the table. If this can be an issue,
