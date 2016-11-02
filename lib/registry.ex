@@ -126,7 +126,7 @@ defmodule Registry do
 
   The third argument given to `register/3` is a value associated to the
   current process. While in the previous section we used it when dispatching,
-  in this particular example we are not interested on it, so we have set it
+  in this particular example we are not interested in it, so we have set it
   to an empty list. You could store a more meaningful value if necessary.
 
   ## Registrations
