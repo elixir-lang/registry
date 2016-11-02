@@ -153,8 +153,8 @@ defmodule Registry do
   # TODO: Decide if it should be started as part of Elixir's supervision tree.
 
   @kind [:unique, :duplicate]
-  @info -1
-  @listeners -2
+  @all_info -1
+  @key_info -2
 
   @typedoc "The registry identifier"
   @type registry :: atom
@@ -178,8 +178,8 @@ defmodule Registry do
 
   @doc false
   def whereis_name({registry, key}) do
-    case info!(registry) do
-      {:unique, partitions, key_ets, _pid_ets} ->
+    case key_info!(registry) do
+      {:unique, partitions, key_ets} ->
         key_ets = key_ets || key_ets!(registry, key, partitions)
         case safe_lookup_second(key_ets, key) do
           {pid, _} ->
@@ -187,7 +187,7 @@ defmodule Registry do
           _ ->
             :undefined
         end
-      {kind, _, _, _} ->
+      {kind, _, _} ->
         raise ArgumentError, ":via is not supported for #{kind} registries"
     end
   end
@@ -267,8 +267,9 @@ defmodule Registry do
     end
 
     # The @info format must be kept in sync with Registry.Partition optimization.
-    entries = [{@info, {kind, partitions, nil, nil}}, {@listeners, listeners} | meta]
-    Registry.Supervisor.start_link(kind, registry, partitions, entries)
+    entries = [{@all_info, {kind, partitions, nil, nil, listeners}},
+               {@key_info, {kind, partitions, nil}} | meta]
+    Registry.Supervisor.start_link(kind, registry, partitions, listeners, entries)
   end
 
   @doc """
@@ -293,8 +294,8 @@ defmodule Registry do
   """
   @spec update_value(registry, key, (value -> value)) :: {new_value :: term, old_value :: term} | :error
   def update_value(registry, key, callback) when is_atom(registry) and is_function(callback, 1) do
-    case info!(registry) do
-      {:unique, partitions, key_ets, _} ->
+    case key_info!(registry) do
+      {:unique, partitions, key_ets} ->
         key_ets = key_ets || key_ets!(registry, key, partitions)
         try do
           :ets.lookup_element(key_ets, key, 2)
@@ -308,7 +309,7 @@ defmodule Registry do
           {_, _} ->
             :error
         end
-      {kind, _, _, _} ->
+      {kind, _, _} ->
         raise ArgumentError, "Registry.update_value/3 is not supported for #{kind} registries"
     end
   end
@@ -341,17 +342,17 @@ defmodule Registry do
   def dispatch(registry, key, mfa_or_fun)
       when is_atom(registry) and is_function(mfa_or_fun, 1)
       when is_atom(registry) and tuple_size(mfa_or_fun) == 3 do
-    case info!(registry) do
-      {:unique, partitions, key_ets, _pid_ets} ->
+    case key_info!(registry) do
+      {:unique, partitions, key_ets} ->
         (key_ets || key_ets!(registry, key, partitions))
         |> safe_lookup_second(key)
         |> List.wrap()
         |> apply_non_empty_to_mfa_or_fun(mfa_or_fun)
-      {:duplicate, 1, key_ets, _pid_ets} ->
+      {:duplicate, 1, key_ets} ->
         key_ets
         |> safe_lookup_second(key)
         |> apply_non_empty_to_mfa_or_fun(mfa_or_fun)
-      {:duplicate, partitions, _, _} ->
+      {:duplicate, partitions, _} ->
         registry
         |> dispatch_task(key, mfa_or_fun, partitions)
         |> Enum.each(&Task.await(&1, :infinity))
@@ -422,8 +423,8 @@ defmodule Registry do
   """
   @spec lookup(registry, key) :: [{pid, value}]
   def lookup(registry, key) when is_atom(registry) do
-    case info!(registry) do
-      {:unique, partitions, key_ets, _pid_ets} ->
+    case key_info!(registry) do
+      {:unique, partitions, key_ets} ->
         key_ets = key_ets || key_ets!(registry, key, partitions)
         case safe_lookup_second(key_ets, key) do
           {pid, _} = pair ->
@@ -432,12 +433,12 @@ defmodule Registry do
             []
         end
 
-      {:duplicate, 1, key_ets, _pid_ets} ->
+      {:duplicate, 1, key_ets} ->
         for {pid, _} = pair <- safe_lookup_second(key_ets, key),
             Process.alive?(pid),
             do: pair
 
-      {:duplicate, partitions, _key_ets, _pid_ets} ->
+      {:duplicate, partitions, _key_ets} ->
         for i <- :lists.seq(0, partitions-1),
             {pid, _} = pair <- safe_lookup_second(key_ets!(registry, i), key),
             Process.alive?(pid),
@@ -479,7 +480,7 @@ defmodule Registry do
   """
   @spec keys(registry, pid) :: [key]
   def keys(registry, pid) when is_atom(registry) and is_pid(pid) do
-    {kind, partitions, _, pid_ets} = info!(registry)
+    {kind, partitions, _, pid_ets, _} = info!(registry)
     {_, pid_ets} = pid_ets || pid_ets!(registry, pid, partitions)
     keys = safe_lookup_second(pid_ets, pid)
 
@@ -527,7 +528,7 @@ defmodule Registry do
   @spec unregister(registry, key) :: :ok
   def unregister(registry, key) when is_atom(registry) do
     self = self()
-    {kind, partitions, key_ets, pid_ets} = info!(registry)
+    {kind, partitions, key_ets, pid_ets, listeners} = info!(registry)
     {key_partition, pid_partition} = partitions(kind, key, self, partitions)
     key_ets = key_ets || key_ets!(registry, key_partition)
     {pid_server, pid_ets} = pid_ets || pid_ets!(registry, pid_partition)
@@ -540,7 +541,7 @@ defmodule Registry do
 
     unlink_if_unregistered(pid_server, pid_ets, self)
 
-    for listener <- listeners!(registry) do
+    for listener <- listeners do
       Kernel.send(listener, {:unregister, registry, key, self})
     end
 
@@ -588,7 +589,7 @@ defmodule Registry do
   @spec register(registry, key, value) :: {:ok, pid} | {:error, {:already_registered, pid}}
   def register(registry, key, value) when is_atom(registry) do
     self = self()
-    {kind, partitions, key_ets, pid_ets} = info!(registry)
+    {kind, partitions, key_ets, pid_ets, listeners} = info!(registry)
     {key_partition, pid_partition} = partitions(kind, key, self, partitions)
     key_ets = key_ets || key_ets!(registry, key_partition)
     {pid_server, pid_ets} = pid_ets || pid_ets!(registry, pid_partition)
@@ -600,7 +601,7 @@ defmodule Registry do
     true = :ets.insert(pid_ets, {self, key, key_ets})
     case register_key(kind, pid_server, key_ets, key, {key, {self, value}}) do
       {:ok, _} = ok ->
-        for listener <- listeners!(registry) do
+        for listener <- listeners do
           Kernel.send(listener, {:register, registry, key, self, value})
         end
         ok
@@ -703,15 +704,20 @@ defmodule Registry do
 
   defp info!(registry) do
     try do
-      :ets.lookup_element(registry, @info, 2)
+      :ets.lookup_element(registry, @all_info, 2)
     catch
       :error, :badarg ->
         raise ArgumentError, "unknown registry: #{inspect registry}"
     end
   end
 
-  defp listeners!(registry) do
-    :ets.lookup_element(registry, @listeners, 2)
+  defp key_info!(registry) do
+    try do
+      :ets.lookup_element(registry, @key_info, 2)
+    catch
+      :error, :badarg ->
+        raise ArgumentError, "unknown registry: #{inspect registry}"
+    end
   end
 
   defp key_ets!(registry, key, partitions) do
@@ -757,11 +763,11 @@ defmodule Registry.Supervisor do
   @moduledoc false
   use Supervisor
 
-  def start_link(kind, registry, partitions, entries) do
-    Supervisor.start_link(__MODULE__, {kind, registry, partitions, entries}, name: registry)
+  def start_link(kind, registry, partitions, listeners, entries) do
+    Supervisor.start_link(__MODULE__, {kind, registry, partitions, listeners, entries}, name: registry)
   end
 
-  def init({kind, registry, partitions, entries}) do
+  def init({kind, registry, partitions, listeners, entries}) do
     ^registry = :ets.new(registry, [:set, :public, :named_table, read_concurrency: true])
     true = :ets.insert(registry, entries)
 
@@ -769,7 +775,7 @@ defmodule Registry.Supervisor do
       for i <- 0..partitions-1 do
         key_partition = Registry.Partition.key_name(registry, i)
         pid_partition = Registry.Partition.pid_name(registry, i)
-        arg = {kind, registry, i, key_partition, pid_partition, partitions}
+        arg = {kind, registry, i, partitions, key_partition, pid_partition, listeners}
         worker(Registry.Partition, [pid_partition, arg], id: pid_partition)
       end
 
@@ -794,7 +800,8 @@ defmodule Registry.Partition do
   # and is responsible for monitoring processes that map to
   # the its own pid table.
   use GenServer
-  @info -1
+  @all_info -1
+  @key_info -2
 
   @doc """
   Returns the name of key partition table.
@@ -824,7 +831,7 @@ defmodule Registry.Partition do
 
   ## Callbacks
 
-  def init({kind, registry, i, key_partition, pid_partition, partitions}) do
+  def init({kind, registry, i, partitions, key_partition, pid_partition, listeners}) do
     Process.flag(:trap_exit, true)
     key_ets = init_key_ets(kind, key_partition)
     pid_ets = init_pid_ets(kind, pid_partition)
@@ -832,7 +839,10 @@ defmodule Registry.Partition do
     # If we have only one partition, we do an optimization which
     # is to write the table information alongside the registry info.
     if partitions == 1 do
-      true = :ets.insert(registry, {@info, {kind, 1, key_ets, {self(), pid_ets}}})
+      entries =
+        [{@key_info, {kind, partitions, key_ets}},
+         {@all_info, {kind, partitions, key_ets, {self(), pid_ets}, listeners}}]
+      true = :ets.insert(registry, entries)
     else
       true = :ets.insert(registry, {i, key_ets, {self(), pid_ets}})
     end

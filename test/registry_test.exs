@@ -354,7 +354,7 @@ defmodule RegistryTest do
         kill_and_assert_down(task1)
         kill_and_assert_down(task2)
 
-        [{-1, {_, _, key, {partition, pid}}}] = :ets.lookup(registry, -1)
+        [{-1, {_, _, key, {partition, pid}, _}}] = :ets.lookup(registry, -1)
         GenServer.call(partition, :sync)
         assert :ets.tab2list(key) == []
         assert :ets.tab2list(pid) == []
