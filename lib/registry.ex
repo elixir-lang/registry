@@ -134,7 +134,7 @@ defmodule Registry do
   Looking up, dispatching and registering are efficient and immediate at
   the cost of delayed unsubscription. For example, if a process crashes,
   its keys are automatically removed from the registry but the change may
-  not propagate immediately. This means certain operations may return process
+  not propagate immediately. This means certain operations may return processes
   that are already dead. When such may happen, it will be explicitly stated
   in the function documentation.
 
