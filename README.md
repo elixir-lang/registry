@@ -1,3 +1,5 @@
+**NOTE: the Registry source code has been merged into Elixir and will be included in Elixir v1.4.**
+
 # Registry
 
 A local, decentralized and scalable key-value process storage. [See the documentation](http://elixir-lang.org/docs/registry).
